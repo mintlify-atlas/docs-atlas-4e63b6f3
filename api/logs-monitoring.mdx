@@ -1,0 +1,338 @@
+---
+title: Logs & monitoring
+description: Access server logs, sync logs, and system metrics
+icon: chart-line
+---
+
+Monitor Duckling's operations through logs and metrics endpoints.
+
+## Logs API
+
+### Get server logs
+
+<ParamField query="limit" type="number" default="100">
+  Maximum number of log entries to return
+</ParamField>
+
+<ParamField query="offset" type="number" default="0">
+  Number of log entries to skip
+</ParamField>
+
+<ParamField query="level" type="string">
+  Filter by log level: `debug`, `info`, `warn`, `error`
+</ParamField>
+
+```bash
+curl http://localhost:3001/api/logs?limit=50&level=error \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "logs": [
+    {
+      "timestamp": "2024-03-01T10:30:00Z",
+      "level": "error",
+      "message": "Connection timeout to MySQL",
+      "context": {
+        "database": "lms",
+        "duration": "30000ms"
+      }
+    }
+  ],
+  "total": 125,
+  "limit": 50,
+  "offset": 0
+}
+```
+
+### Get synchronization logs
+
+<ParamField query="db" type="string">
+  Database ID to filter logs (required for multi-database setups)
+</ParamField>
+
+<ParamField query="limit" type="number" default="100">
+  Maximum number of log entries to return
+</ParamField>
+
+<ParamField query="offset" type="number" default="0">
+  Number of log entries to skip
+</ParamField>
+
+<ParamField query="status" type="string">
+  Filter by status: `success` or `error`
+</ParamField>
+
+<ParamField query="table" type="string">
+  Filter by specific table name
+</ParamField>
+
+```bash
+curl "http://localhost:3001/api/sync-logs?db=lms&status=success&limit=20" \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "logs": [
+    {
+      "id": 1523,
+      "table_name": "User",
+      "sync_type": "incremental",
+      "records_processed": 1250,
+      "duration_ms": 2340,
+      "status": "success",
+      "error_message": null,
+      "watermark_before": {"lastProcessedId": 98500, "lastProcessedTimestamp": "2024-03-01T10:25:00Z"},
+      "watermark_after": {"lastProcessedId": 99750, "lastProcessedTimestamp": "2024-03-01T10:30:00Z"},
+      "created_at": "2024-03-01T10:30:15Z"
+    }
+  ],
+  "total": 1523,
+  "limit": 20,
+  "offset": 0
+}
+```
+
+<ResponseField name="sync_type" type="string">
+  Type of sync: `watermark`, `sequential`, `full`
+</ResponseField>
+
+<ResponseField name="watermark_before" type="object">
+  Watermark state before sync operation
+</ResponseField>
+
+<ResponseField name="watermark_after" type="object">
+  Watermark state after sync operation
+</ResponseField>
+
+## Metrics API
+
+### System metrics
+
+Get real-time system resource metrics.
+
+```bash
+curl http://localhost:3001/api/metrics/system \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "timestamp": "2024-03-01T10:30:00Z",
+  "cpu": {
+    "usage": 45.2,
+    "count": 8
+  },
+  "memory": {
+    "used": 2147483648,
+    "total": 8589934592,
+    "percentage": 25.0,
+    "heapUsed": 524288000,
+    "heapTotal": 1073741824
+  },
+  "eventLoop": {
+    "lag": 2.5,
+    "maxLag": 15.3
+  },
+  "uptime": 86400
+}
+```
+
+<ResponseField name="cpu.usage" type="number">
+  CPU usage percentage (0-100)
+</ResponseField>
+
+<ResponseField name="memory.used" type="number">
+  Memory used in bytes
+</ResponseField>
+
+<ResponseField name="eventLoop.lag" type="number">
+  Current event loop lag in milliseconds
+</ResponseField>
+
+<ResponseField name="uptime" type="number">
+  Server uptime in seconds
+</ResponseField>
+
+### Query metrics
+
+Get query performance metrics and patterns.
+
+```bash
+curl http://localhost:3001/api/metrics/queries \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "timestamp": "2024-03-01T10:30:00Z",
+  "totalQueries": 125430,
+  "avgDuration": 45.3,
+  "slowQueries": 23,
+  "errorRate": 0.02,
+  "topQueries": [
+    {
+      "pattern": "SELECT COUNT(*) FROM User WHERE status = ?",
+      "count": 1250,
+      "avgDuration": 15.3,
+      "maxDuration": 89.2
+    }
+  ]
+}
+```
+
+<ResponseField name="totalQueries" type="number">
+  Total number of queries executed
+</ResponseField>
+
+<ResponseField name="avgDuration" type="number">
+  Average query duration in milliseconds
+</ResponseField>
+
+<ResponseField name="slowQueries" type="number">
+  Number of queries exceeding timeout threshold
+</ResponseField>
+
+<ResponseField name="topQueries" type="array">
+  Most frequently executed query patterns
+</ResponseField>
+
+### Worker pool statistics
+
+Get worker thread pool statistics for row sanitization.
+
+```bash
+curl http://localhost:3001/api/workers/stats \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "threadCount": 7,
+  "activeThreads": 3,
+  "queuedTasks": 12,
+  "completedTasks": 45230,
+  "totalProcessingTime": 1523400
+}
+```
+
+<ResponseField name="threadCount" type="number">
+  Total number of worker threads
+</ResponseField>
+
+<ResponseField name="activeThreads" type="number">
+  Currently active worker threads
+</ResponseField>
+
+<ResponseField name="queuedTasks" type="number">
+  Tasks waiting in queue
+</ResponseField>
+
+## Real-time monitoring
+
+### Enhanced metrics endpoint
+
+Get comprehensive metrics for all configured databases.
+
+```bash
+curl http://localhost:3001/metrics \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "timestamp": "2024-03-01T10:30:00Z",
+  "databases": [
+    {
+      "id": "lms",
+      "name": "LMS",
+      "status": "healthy",
+      "lastSync": "2024-03-01T10:25:00Z",
+      "tableCount": 181,
+      "totalRecords": 1234567,
+      "syncDuration": 2340
+    }
+  ],
+  "system": {
+    "cpu": 45.2,
+    "memory": 25.0,
+    "uptime": 86400
+  }
+}
+```
+
+## Use cases
+
+### Monitoring dashboard
+
+```typescript
+const response = await fetch('http://localhost:3001/api/metrics/system', {
+  headers: { 'Authorization': `Bearer ${apiKey}` }
+});
+const metrics = await response.json();
+
+console.log(`CPU: ${metrics.cpu.usage}%`);
+console.log(`Memory: ${metrics.memory.percentage}%`);
+console.log(`Event Loop Lag: ${metrics.eventLoop.lag}ms`);
+```
+
+### Alerting on sync failures
+
+```bash
+#!/bin/bash
+FAILED=$(curl -s "http://localhost:3001/api/sync-logs?status=error&limit=1" \
+  -H "Authorization: Bearer $DUCKLING_API_KEY" | jq '.total')
+
+if [ "$FAILED" -gt 0 ]; then
+  echo "Alert: $FAILED sync failures detected"
+  # Send alert to monitoring system
+fi
+```
+
+### Query performance tracking
+
+```typescript
+const response = await fetch('http://localhost:3001/api/metrics/queries', {
+  headers: { 'Authorization': `Bearer ${apiKey}` }
+});
+const metrics = await response.json();
+
+// Alert on high error rate
+if (metrics.errorRate > 0.05) {
+  console.warn(`High query error rate: ${metrics.errorRate * 100}%`);
+}
+
+// Alert on slow queries
+if (metrics.slowQueries > 100) {
+  console.warn(`${metrics.slowQueries} slow queries detected`);
+}
+```
+
+<Info>
+  Metrics are collected every 30 seconds and kept for 30 minutes in memory. For long-term storage, export to external monitoring systems like Prometheus or Grafana.
+</Info>
+
+## Related endpoints
+
+<CardGroup cols={2}>
+  <Card title="Health checks" icon="heart-pulse" href="/api/health-status">
+    Database connectivity and system health
+  </Card>
+  <Card title="Sync status" icon="arrows-rotate" href="/api/synchronization">
+    Synchronization status and progress
+  </Card>
+</CardGroup>

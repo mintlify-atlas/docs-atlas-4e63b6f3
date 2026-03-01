@@ -1,0 +1,319 @@
+---
+title: Diagnostics
+description: Diagnose database connection issues and troubleshoot problems
+icon: stethoscope
+---
+
+Advanced diagnostic tools for troubleshooting database connectivity and configuration issues.
+
+## Database diagnostics
+
+### Run diagnostic check
+
+Perform comprehensive diagnostic checks on database connections.
+
+<ParamField path="id" type="string" required>
+  Database ID to diagnose
+</ParamField>
+
+```bash
+curl -X POST http://localhost:3001/api/databases/lms/diagnose \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "database": {
+    "id": "lms",
+    "name": "LMS",
+    "duckdbPath": "data/lms.db"
+  },
+  "checks": [
+    {
+      "name": "MySQL Connection",
+      "status": "pass",
+      "message": "Successfully connected to MySQL",
+      "duration": 145
+    },
+    {
+      "name": "DuckDB File",
+      "status": "pass",
+      "message": "DuckDB file exists and is accessible",
+      "size": 2147483648
+    },
+    {
+      "name": "Table Count Match",
+      "status": "warning",
+      "message": "MySQL has 181 tables, DuckDB has 180 tables",
+      "details": {
+        "mysqlTables": 181,
+        "duckdbTables": 180,
+        "missingTables": ["NewTable"]
+      }
+    },
+    {
+      "name": "Schema Validation",
+      "status": "pass",
+      "message": "All table schemas match",
+      "tablesChecked": 180
+    }
+  ],
+  "summary": {
+    "total": 4,
+    "passed": 3,
+    "warnings": 1,
+    "failures": 0
+  },
+  "timestamp": "2024-03-01T10:30:00Z"
+}
+```
+
+<ResponseField name="checks" type="array">
+  List of diagnostic check results
+</ResponseField>
+
+<ResponseField name="checks[].status" type="string">
+  Check status: `pass`, `warning`, or `fail`
+</ResponseField>
+
+<ResponseField name="checks[].duration" type="number">
+  Time taken for the check in milliseconds
+</ResponseField>
+
+### Stream diagnostic events (SSE)
+
+Stream real-time diagnostic events as they occur.
+
+<ParamField path="id" type="string" required>
+  Database ID to diagnose
+</ParamField>
+
+```bash
+curl -N http://localhost:3001/api/databases/lms/diagnose/stream \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Event stream:**
+
+```
+event: check_start
+data: {"name":"MySQL Connection","timestamp":"2024-03-01T10:30:00Z"}
+
+event: check_complete
+data: {"name":"MySQL Connection","status":"pass","duration":145}
+
+event: check_start
+data: {"name":"DuckDB File","timestamp":"2024-03-01T10:30:01Z"}
+
+event: check_complete
+data: {"name":"DuckDB File","status":"pass","duration":23}
+
+event: diagnostic_complete
+data: {"summary":{"total":4,"passed":3,"warnings":1,"failures":0}}
+```
+
+<Info>
+  The diagnostic stream uses Server-Sent Events (SSE) to provide real-time updates. Each event contains JSON data with check progress and results.
+</Info>
+
+## Diagnostic checks performed
+
+The diagnostic tool performs the following checks:
+
+<AccordionGroup>
+  <Accordion title="MySQL Connection">
+    Tests connectivity to the MySQL source database, verifies credentials, and measures latency.
+    
+    **Checks:**
+    - TCP connection to MySQL host and port
+    - Authentication with provided credentials
+    - Query execution (`SELECT 1`)
+    - Connection latency measurement
+  </Accordion>
+
+  <Accordion title="DuckDB File">
+    Verifies DuckDB database file exists, is accessible, and not corrupted.
+    
+    **Checks:**
+    - File exists at specified path
+    - File permissions are correct
+    - File size is reasonable (not 0 bytes)
+    - Can open database connection
+    - Can execute simple query
+  </Accordion>
+
+  <Accordion title="Table Count Match">
+    Compares table counts between MySQL and DuckDB to identify missing tables.
+    
+    **Checks:**
+    - Count tables in MySQL
+    - Count tables in DuckDB
+    - Identify tables in MySQL not in DuckDB
+    - Identify tables in DuckDB not in MySQL
+  </Accordion>
+
+  <Accordion title="Schema Validation">
+    Validates that table schemas match between MySQL and DuckDB.
+    
+    **Checks:**
+    - Column names match
+    - Column types are compatible
+    - Primary keys are defined
+    - Column order is consistent
+  </Accordion>
+
+  <Accordion title="Sync Status">
+    Checks the status of the most recent synchronization.
+    
+    **Checks:**
+    - Last sync timestamp
+    - Sync status (success/error)
+    - Records processed in last sync
+    - Watermark positions
+  </Accordion>
+
+  <Accordion title="Automation Status">
+    Verifies automation services are running correctly.
+    
+    **Checks:**
+    - Auto-sync service status
+    - Backup service status
+    - Health monitoring service status
+    - Next scheduled run times
+  </Accordion>
+</AccordionGroup>
+
+## Use cases
+
+### Troubleshoot connection issues
+
+```bash
+# Run diagnostic and save results
+curl -X POST http://localhost:3001/api/databases/lms/diagnose \
+  -H "Authorization: Bearer $DUCKLING_API_KEY" \
+  | jq '.' > diagnostic-report.json
+
+# Check for failures
+jq '.checks[] | select(.status == "fail")' diagnostic-report.json
+```
+
+### Monitor diagnostic stream
+
+```javascript
+const eventSource = new EventSource(
+  'http://localhost:3001/api/databases/lms/diagnose/stream',
+  {
+    headers: {
+      'Authorization': `Bearer ${apiKey}`
+    }
+  }
+);
+
+eventSource.addEventListener('check_complete', (event) => {
+  const check = JSON.parse(event.data);
+  console.log(`${check.name}: ${check.status} (${check.duration}ms)`);
+  
+  if (check.status === 'fail') {
+    console.error(`Check failed: ${check.message}`);
+  }
+});
+
+eventSource.addEventListener('diagnostic_complete', (event) => {
+  const summary = JSON.parse(event.data);
+  console.log('Diagnostic complete:', summary);
+  eventSource.close();
+});
+```
+
+### Automated health checks
+
+```bash
+#!/bin/bash
+# Run diagnostics for all databases
+
+for db in $(curl -s http://localhost:3001/api/databases \
+  -H "Authorization: Bearer $DUCKLING_API_KEY" | jq -r '.[].id'); do
+  
+  echo "Diagnosing $db..."
+  
+  FAILURES=$(curl -s -X POST "http://localhost:3001/api/databases/$db/diagnose" \
+    -H "Authorization: Bearer $DUCKLING_API_KEY" \
+    | jq '.summary.failures')
+  
+  if [ "$FAILURES" -gt 0 ]; then
+    echo "❌ Database $db has $FAILURES failed checks"
+    # Send alert
+  else
+    echo "✅ Database $db passed all checks"
+  fi
+done
+```
+
+## Integration with monitoring
+
+### Prometheus metrics
+
+```python
+from prometheus_client import Gauge, start_http_server
+import requests
+import time
+
+# Define metrics
+diagnostic_failures = Gauge('duckling_diagnostic_failures', 
+                           'Number of failed diagnostic checks',
+                           ['database'])
+
+def collect_diagnostics():
+    response = requests.post(
+        'http://localhost:3001/api/databases/lms/diagnose',
+        headers={'Authorization': f'Bearer {api_key}'}
+    )
+    data = response.json()
+    
+    diagnostic_failures.labels(database='lms').set(data['summary']['failures'])
+
+# Start metrics server
+start_http_server(8000)
+
+# Collect diagnostics every 5 minutes
+while True:
+    collect_diagnostics()
+    time.sleep(300)
+```
+
+### Grafana alerting
+
+```yaml
+# Grafana alert rule
+- alert: DucklingDiagnosticFailure
+  expr: duckling_diagnostic_failures > 0
+  for: 5m
+  labels:
+    severity: critical
+  annotations:
+    summary: "Duckling diagnostic check failed"
+    description: "Database {{ $labels.database }} has {{ $value }} failed diagnostic checks"
+```
+
+<Warning>
+  Diagnostic checks perform read operations on both MySQL and DuckDB. Running diagnostics frequently may impact performance. Recommended interval: once every 5-15 minutes.
+</Warning>
+
+## Related endpoints
+
+<CardGroup cols={2}>
+  <Card title="Health checks" icon="heart-pulse" href="/api/health-status">
+    Basic connectivity checks
+  </Card>
+  <Card title="Database management" icon="database" href="/api/database-management">
+    Manage database configurations
+  </Card>
+  <Card title="Logs & monitoring" icon="chart-line" href="/api/logs-monitoring">
+    Access logs and metrics
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/guides/debugging">
+    Debugging guide
+  </Card>
+</CardGroup>

@@ -81,7 +81,9 @@
               "api/synchronization",
               "api/data-access",
               "api/database-management",
-              "api/automation"
+              "api/automation",
+              "api/logs-monitoring",
+              "api/diagnostics"
             ]
           },
           {
