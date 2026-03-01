@@ -1,0 +1,151 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "Duckling",
+  "projectDescription": "High-performance DuckDB server that replicates MySQL data with ACID transactions, achieving 100-13,000x faster analytical queries through columnar storage",
+  "theme": "aspen",
+  "primaryColor": "#0EA5E9",
+  "lightColor": "#7DD3FC",
+  "darkColor": "#0284C7",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/sequential-appender",
+              "concepts/sync-modes",
+              "concepts/multi-database"
+            ]
+          },
+          {
+            "group": "Setup & Deployment",
+            "pages": [
+              "deployment/docker",
+              "deployment/configuration",
+              "deployment/production",
+              "deployment/security"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/synchronization",
+              "operations/monitoring",
+              "operations/backups",
+              "operations/performance-tuning"
+            ]
+          },
+          {
+            "group": "Advanced Features",
+            "pages": [
+              "advanced/cdc-binlog",
+              "advanced/mysql-protocol",
+              "advanced/query-governor",
+              "advanced/read-replicas",
+              "advanced/s3-backups"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "REST API",
+            "pages": [
+              "api/authentication",
+              "api/health-status",
+              "api/synchronization",
+              "api/data-access",
+              "api/database-management",
+              "api/automation"
+            ]
+          },
+          {
+            "group": "WebSocket SDK",
+            "pages": [
+              "sdk/overview",
+              "sdk/installation",
+              "sdk/client",
+              "sdk/types",
+              "sdk/examples"
+            ]
+          },
+          {
+            "group": "CLI Reference",
+            "pages": [
+              "cli/overview",
+              "cli/commands"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Guides",
+        "groups": [
+          {
+            "group": "Integration Guides",
+            "pages": [
+              "guides/nodejs-integration",
+              "guides/docker-compose",
+              "guides/microservices",
+              "guides/real-time-dashboards"
+            ]
+          },
+          {
+            "group": "Type Mapping",
+            "pages": [
+              "guides/type-support",
+              "guides/schema-evolution"
+            ]
+          },
+          {
+            "group": "Troubleshooting",
+            "pages": [
+              "guides/common-issues",
+              "guides/debugging",
+              "guides/migration"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "ACID transaction-based MySQL to DuckDB replication",
+    "Sequential Appender architecture (60,000+ rows/sec)",
+    "Multi-database support with isolated replicas",
+    "CDC binlog streaming for sub-second replication",
+    "WebSocket SDK with 5-15ms query latency",
+    "MySQL wire protocol server (port 3307)",
+    "Automated sync, backups, and health monitoring",
+    "S3 cloud backups with client-side encryption",
+    "Query governor and read replicas",
+    "100-13,000x faster analytical queries"
+  ],
+  "publicApiSurface": [
+    "GET /health",
+    "GET /status",
+    "POST /sync/full",
+    "POST /sync/incremental",
+    "POST /query",
+    "GET /tables",
+    "GET /api/databases",
+    "POST /api/databases",
+    "WebSocket: ws://localhost:3001/ws",
+    "MySQL Protocol: localhost:3307",
+    "DucklingClient (WebSocket SDK)",
+    "CLI: sync, sync:incremental, health, status, validate"
+  ]
+}
