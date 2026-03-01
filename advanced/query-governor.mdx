@@ -1,0 +1,404 @@
+---
+title: "Query Governor"
+description: "Concurrency control, timeouts, and queue management for DuckDB queries"
+---
+
+# Query Governor
+
+The Query Governor provides resource management for DuckDB operations with semaphore-based concurrency limiting, per-query timeouts, and priority-based scheduling.
+
+## Overview
+
+DuckDB queries can be CPU-intensive (aggregations, joins) and block other operations. The Query Governor prevents resource exhaustion by:
+
+- **Concurrency Limiting**: Max concurrent queries via semaphore
+- **Timeouts**: Per-query timeout with graceful degradation
+- **Queue Management**: FIFO queue with max depth (503 when full)
+- **Priority Lanes**: High-priority for sync/CDC, normal for API queries
+- **Anti-Starvation**: Prevents high-priority queries from blocking normal queries
+
+## Environment Variables
+
+<ParamField path="GOVERNOR_MAX_CONCURRENT_QUERIES" type="number" default="5">
+  Maximum concurrent DuckDB queries. Queries exceeding this limit are queued.
+</ParamField>
+
+<ParamField path="GOVERNOR_QUERY_TIMEOUT_MS" type="number" default="60000">
+  Per-query timeout in milliseconds (60 seconds default). Set to `0` to disable.
+</ParamField>
+
+<ParamField path="GOVERNOR_QUERY_QUEUE_MAX" type="number" default="100">
+  Maximum queue depth. Queries exceeding this limit receive HTTP 503 errors.
+</ParamField>
+
+<ParamField path="GOVERNOR_MAX_CONSECUTIVE_HIGH_PRIORITY" type="number" default="5">
+  Anti-starvation threshold. After N high-priority queries, yield to normal priority.
+</ParamField>
+
+## Configuration Example
+
+```bash .env
+# Allow 10 concurrent queries
+GOVERNOR_MAX_CONCURRENT_QUERIES=10
+
+# 2 minute timeout
+GOVERNOR_QUERY_TIMEOUT_MS=120000
+
+# Queue up to 200 requests
+GOVERNOR_QUERY_QUEUE_MAX=200
+
+# Anti-starvation after 10 high-priority queries
+GOVERNOR_MAX_CONSECUTIVE_HIGH_PRIORITY=10
+```
+
+## Architecture
+
+```text
+API Request → Governor.execute() → [Semaphore] → DuckDB Query → Response
+                    ↓                    ↓             ↓
+              Check Slots          Acquire Slot    Timeout Wrapper
+                    ↓                    ↓             ↓
+            Queue if full         Run Query     Release Slot
+                    ↓
+        Priority Scheduling
+        (high → normal)
+```
+
+## Concurrency Control
+
+### Semaphore Pattern
+
+The governor uses a counting semaphore to limit concurrent queries:
+
+```typescript
+class QueryGovernor {
+  private running: number = 0;
+  private maxConcurrent: number = 5;
+  private queue: QueueEntry[] = [];
+
+  async execute<T>(fn: () => Promise<T>): Promise<T> {
+    // Wait for slot if at max concurrency
+    if (this.running >= this.maxConcurrent) {
+      await this.enqueue();
+    }
+
+    this.running++; // Acquire slot
+    try {
+      return await this.withTimeout(fn());
+    } finally {
+      this.running--; // Release slot
+      this.dequeue(); // Wake next queued query
+    }
+  }
+}
+```
+
+### Queue Behavior
+
+**When queue is not full:**
+- Query is added to queue
+- Returns Promise that resolves when a slot is available
+- FIFO ordering with priority lanes
+
+**When queue is full:**
+- Query is rejected immediately
+- HTTP 503 error: "Server overloaded"
+- Client should retry with exponential backoff
+
+<CodeGroup>
+```bash Normal Load (queue available)
+curl -X POST http://localhost:3001/api/query \
+  -H "Authorization: Bearer $DUCKLING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT COUNT(*) FROM users"}'
+
+# Response: 200 OK (may wait in queue)
+```
+
+```bash Overloaded (queue full)
+curl -X POST http://localhost:3001/api/query \
+  -H "Authorization: Bearer $DUCKLING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT COUNT(*) FROM users"}'
+
+# Response: 503 Service Unavailable
+{
+  "error": "Server overloaded: 100 queries queued, 5 running. Try again later."
+}
+```
+</CodeGroup>
+
+## Priority Lanes
+
+The governor supports two priority levels:
+
+| Priority | Use Case | Examples |
+|----------|----------|----------|
+| `high` | Sync/CDC operations | Full sync, incremental sync, CDC writes |
+| `normal` | API queries | `/api/query`, `/api/tables/:name/data` |
+
+### Priority Scheduling
+
+When multiple queries are queued:
+
+1. **High-Priority First**: High-priority queries dequeued before normal
+2. **Anti-Starvation**: After N consecutive high-priority, yield to normal
+3. **FIFO within Priority**: Same-priority queries processed in order
+
+```typescript
+// Internal dequeue logic
+if (consecutiveHighPriority >= maxConsecutiveHighPriority) {
+  // Yield to normal priority to prevent starvation
+  const normalIdx = queue.findIndex(e => e.priority === 'normal');
+  if (normalIdx >= 0) {
+    return queue.splice(normalIdx, 1)[0];
+  }
+}
+
+// Otherwise, pick highest-priority FIFO
+const highIdx = queue.findIndex(e => e.priority === 'high');
+if (highIdx >= 0) {
+  consecutiveHighPriority++;
+  return queue.splice(highIdx, 1)[0];
+}
+```
+
+<Note>
+  **Anti-Starvation**: Ensures normal-priority queries make progress even under sustained high-priority load (e.g., continuous CDC writes).
+</Note>
+
+## Query Timeouts
+
+### Timeout Behavior
+
+When a query exceeds `GOVERNOR_QUERY_TIMEOUT_MS`:
+
+1. **Promise Rejected**: HTTP request terminates with 408 error
+2. **Slot Released**: Governor slot freed for next query
+3. **DuckDB Continues**: Query may continue in background (no cancellation API)
+
+<Warning>
+  **DuckDB Limitation**: The `@duckdb/node-api` does not expose query cancellation. Timeouts terminate the Promise wrapper (HTTP response), but the underlying query continues until completion.
+</Warning>
+
+### Timeout Example
+
+```bash
+# Query that exceeds 60 second timeout
+curl -X POST http://localhost:3001/api/query \
+  -H "Authorization: Bearer $DUCKLING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sql": "SELECT COUNT(*) FROM large_table WHERE expensive_function(col)"
+  }'
+
+# Response after 60 seconds:
+# 408 Request Timeout
+{
+  "error": "Query timed out after 60000ms. The query may still be running in DuckDB."
+}
+```
+
+### Disable Timeouts
+
+Set timeout to `0` to disable:
+
+```bash
+GOVERNOR_QUERY_TIMEOUT_MS=0
+```
+
+<Warning>
+  **Risk**: Disabling timeouts can cause resource exhaustion from runaway queries.
+</Warning>
+
+## Monitoring
+
+### Statistics API
+
+Get real-time governor stats:
+
+```bash
+curl http://localhost:3001/api/governor/stats \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "running": 3,
+  "queued": 12,
+  "maxConcurrent": 5,
+  "maxQueue": 100,
+  "timeoutMs": 60000,
+  "totalExecuted": 48293,
+  "totalTimedOut": 7,
+  "totalRejected": 142,
+  "activeQueries": [
+    {
+      "id": "q-48291",
+      "sql": "SELECT COUNT(*) FROM orders WHERE status = 'completed'",
+      "priority": "normal",
+      "startedAt": 1709308921000,
+      "status": "running"
+    },
+    {
+      "id": "q-48292",
+      "sql": "SELECT * FROM users WHERE created_at > '2025-01-01'",
+      "priority": "high",
+      "startedAt": 1709308922000,
+      "status": "queued"
+    }
+  ]
+}
+```
+
+### Key Metrics
+
+<ParamField path="running" type="number">
+  Queries currently executing in DuckDB
+</ParamField>
+
+<ParamField path="queued" type="number">
+  Queries waiting for a slot (should be < maxQueue)
+</ParamField>
+
+<ParamField path="totalRejected" type="number">
+  Queries rejected due to full queue (indicates overload)
+</ParamField>
+
+<ParamField path="totalTimedOut" type="number">
+  Queries that exceeded timeout (indicates slow queries)
+</ParamField>
+
+### Active Query Tracking
+
+Each query is tracked with:
+
+```typescript
+interface QueryInfo {
+  id: string;           // Unique ID (e.g., "q-1234")
+  sql: string;          // Truncated to 200 chars
+  priority: 'high' | 'normal';
+  startedAt: number;    // Unix timestamp (ms)
+  status: 'queued' | 'running';
+}
+```
+
+**Use Case**: Identify long-running queries for optimization:
+
+```bash
+# Find queries running > 30 seconds
+curl http://localhost:3001/api/governor/stats | \
+  jq '.activeQueries[] | select(.status == "running" and (now * 1000 - .startedAt) > 30000)'
+```
+
+## Tuning Recommendations
+
+### Low-Latency API (< 100ms)
+
+```bash
+GOVERNOR_MAX_CONCURRENT_QUERIES=10
+GOVERNOR_QUERY_TIMEOUT_MS=5000
+GOVERNOR_QUERY_QUEUE_MAX=50
+```
+
+**Rationale:**
+- High concurrency for simple queries
+- Aggressive timeout (5s) to kill slow queries
+- Small queue (fail fast on overload)
+
+### Analytical Workload (long-running queries)
+
+```bash
+GOVERNOR_MAX_CONCURRENT_QUERIES=3
+GOVERNOR_QUERY_TIMEOUT_MS=300000
+GOVERNOR_QUERY_QUEUE_MAX=20
+```
+
+**Rationale:**
+- Low concurrency to avoid CPU contention
+- High timeout (5 minutes) for complex aggregations
+- Small queue (analytical queries are expensive)
+
+### Mixed Workload (API + background sync)
+
+```bash
+GOVERNOR_MAX_CONCURRENT_QUERIES=8
+GOVERNOR_QUERY_TIMEOUT_MS=60000
+GOVERNOR_QUERY_QUEUE_MAX=100
+GOVERNOR_MAX_CONSECUTIVE_HIGH_PRIORITY=5
+```
+
+**Rationale:**
+- Medium concurrency for balanced load
+- Moderate timeout (1 minute)
+- Anti-starvation ensures API queries progress during sync
+
+## Error Handling
+
+### QueryGovernorError
+
+The governor throws `QueryGovernorError` with HTTP status code hints:
+
+```typescript
+class QueryGovernorError extends Error {
+  public readonly statusCode: number;
+
+  constructor(message: string, statusCode: number) {
+    super(message);
+    this.statusCode = statusCode; // 408 or 503
+  }
+}
+```
+
+**Error Codes:**
+- **503**: Queue full (server overloaded)
+- **408**: Query timeout (slow query)
+
+### Client Retry Strategy
+
+```typescript
+// Retry with exponential backoff
+async function queryWithRetry(sql: string, maxRetries = 3) {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await fetch('/api/query', {
+        method: 'POST',
+        body: JSON.stringify({ sql })
+      });
+    } catch (err) {
+      if (err.statusCode === 503 && i < maxRetries - 1) {
+        const delay = Math.pow(2, i) * 1000; // 1s, 2s, 4s
+        await new Promise(resolve => setTimeout(resolve, delay));
+      } else {
+        throw err;
+      }
+    }
+  }
+}
+```
+
+## Code Reference
+
+Implementation: `packages/server/src/services/queryGovernor.ts`
+
+**Key Classes:**
+- `QueryGovernor` - Main governor class (singleton)
+- `QueryGovernorError` - Custom error with status code
+- `QueryInfo` - Active query tracking
+- `QueueEntry` - Queue entry with priority
+
+**Key Methods:**
+- `execute()` - Run query through governor (line 85)
+- `getStats()` - Get statistics (line 127)
+- `enqueue()` - Add to queue (line 152)
+- `dequeue()` - Remove from queue with priority (line 173)
+- `withTimeout()` - Wrap promise with timeout (line 210)
+
+**Singleton Access:**
+```typescript
+import { getQueryGovernor } from './services/queryGovernor';
+
+const governor = getQueryGovernor();
+await governor.execute(() => duckdb.query(sql), { sql, priority: 'high' });
+```

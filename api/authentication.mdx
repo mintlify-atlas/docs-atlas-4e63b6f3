@@ -1,0 +1,211 @@
+---
+title: 'Authentication'
+description: 'API authentication methods for the Duckling REST API'
+---
+
+## Overview
+
+All API endpoints require authentication via one of two methods:
+
+1. **API Key Authentication** - Bearer token for programmatic access
+2. **JWT Authentication** - Session-based authentication for web dashboard
+
+## Authentication Methods
+
+### API Key Authentication
+
+Use the `DUCKLING_API_KEY` environment variable to authenticate API requests.
+
+**Header Format:**
+```bash
+Authorization: Bearer <DUCKLING_API_KEY>
+```
+
+**Example:**
+```bash
+curl -X GET http://localhost:3001/health \
+  -H "Authorization: Bearer your-api-key-here"
+```
+
+<Note>
+  The API key is set via the `DUCKLING_API_KEY` environment variable in your deployment configuration.
+</Note>
+
+### JWT Authentication (Web Dashboard)
+
+For web-based authentication, obtain a JWT token by logging in.
+
+#### POST /api/login
+
+Obtain a JWT token for authenticated sessions.
+
+<ParamField body="username" type="string" required>
+  Admin username (configured via `ADMIN_USERNAME` environment variable)
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  Admin password (configured via `ADMIN_PASSWORD` environment variable)
+</ParamField>
+
+**Request Example:**
+```bash
+curl -X POST http://localhost:3001/api/login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "admin",
+    "password": "your-password"
+  }'
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Login successful",
+  "username": "admin",
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "expiresIn": "7d"
+}
+```
+
+<ResponseField name="token" type="string">
+  JWT token to use in subsequent requests
+</ResponseField>
+
+<ResponseField name="expiresIn" type="string">
+  Token expiration duration (default: 7 days)
+</ResponseField>
+
+#### GET /api/check-auth
+
+Verify authentication status and token validity.
+
+**Request Example:**
+```bash
+curl -X GET http://localhost:3001/api/check-auth \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+**Response (Authenticated):**
+```json
+{
+  "authenticated": true,
+  "username": "admin",
+  "authMethod": "jwt"
+}
+```
+
+**Response (Not Authenticated):**
+```json
+{
+  "authenticated": false,
+  "message": "Invalid or expired token"
+}
+```
+
+#### POST /api/logout
+
+Logout endpoint for session cleanup (JWT is stateless, so client must discard token).
+
+**Request Example:**
+```bash
+curl -X POST http://localhost:3001/api/logout \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Logout successful. Please discard your JWT token on the client side."
+}
+```
+
+## Authentication Headers
+
+Once authenticated, include the token in all subsequent requests:
+
+**Using API Key:**
+```bash
+Authorization: Bearer <DUCKLING_API_KEY>
+```
+
+**Using JWT Token:**
+```bash
+Authorization: Bearer <jwt_token>
+```
+
+## Public Endpoints
+
+The following endpoints do **not** require authentication:
+
+- `POST /api/login` - Login endpoint
+- `GET /api/check-auth` - Check authentication status
+- `GET /openapi.json` - OpenAPI specification
+
+## Protected Endpoints
+
+All other endpoints require authentication, including:
+
+- Health & monitoring endpoints (`/health`, `/status`, `/metrics`)
+- Synchronization endpoints (`/sync/*`)
+- Data access endpoints (`/api/query`, `/api/tables/*`)
+- Database management endpoints (`/api/databases/*`)
+- Automation endpoints (`/automation/*`)
+
+## Error Responses
+
+<ResponseField name="401 Unauthorized">
+  Missing or invalid authentication credentials
+</ResponseField>
+
+```json
+{
+  "error": "Unauthorized",
+  "message": "Authentication required. Provide JWT token or API key in Authorization header."
+}
+```
+
+<ResponseField name="403 Forbidden">
+  Valid authentication but insufficient permissions
+</ResponseField>
+
+```json
+{
+  "error": "Forbidden",
+  "message": "Insufficient permissions"
+}
+```
+
+## Security Best Practices
+
+<Warning>
+  **Never commit API keys or passwords to version control.** Use environment variables and secure secret management.
+</Warning>
+
+1. **Use HTTPS in production** - Never send credentials over unencrypted HTTP
+2. **Rotate API keys regularly** - Update the `DUCKLING_API_KEY` environment variable periodically
+3. **Set strong admin passwords** - Use complex passwords for `ADMIN_PASSWORD`
+4. **Monitor authentication attempts** - Review logs for suspicious activity
+5. **Use short-lived tokens** - JWT tokens expire after 7 days by default
+
+## Environment Variables
+
+Configure authentication via environment variables:
+
+```bash
+# API Key for programmatic access
+DUCKLING_API_KEY=your-secure-api-key-here
+
+# Admin credentials for web dashboard
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=your-secure-password-here
+
+# JWT configuration
+JWT_SECRET=your-jwt-secret-key
+JWT_EXPIRES_IN=7d
+```
+
+<Info>
+  If `DUCKLING_API_KEY` is not set, API key authentication will be disabled. JWT authentication via login is always available.
+</Info>

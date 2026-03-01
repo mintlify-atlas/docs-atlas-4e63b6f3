@@ -1,0 +1,622 @@
+---
+title: 'Common Issues & Solutions'
+description: 'Troubleshooting guide for common Duckling problems'
+---
+
+## Sync Issues
+
+### Tables Not Syncing
+
+**Symptoms**: Tables from MySQL are not appearing in DuckDB after sync.
+
+<Accordion title="Solution 1: Check Excluded Tables">
+**Cause**: Tables may be in the `EXCLUDED_TABLES` configuration.
+
+```bash
+# Check .env file
+cat .env | grep EXCLUDED_TABLES
+
+# Remove table from exclusion list
+EXCLUDED_TABLES=old_table,temp_table  # Remove the table you want to sync
+
+# Restart and trigger sync
+docker-compose restart duckdb-server
+curl -X POST http://localhost:3001/api/sync/full
+```
+</Accordion>
+
+<Accordion title="Solution 2: Verify Table Exists in MySQL">
+**Cause**: Table may not exist or may be in a different database.
+
+```bash
+# List all MySQL tables
+docker exec duckling-server node scripts/mysql.js "SHOW TABLES"
+
+# Check specific table
+docker exec duckling-server node scripts/mysql.js "DESCRIBE table_name"
+```
+</Accordion>
+
+<Accordion title="Solution 3: Check Sync Logs">
+**Cause**: Sync may be failing with errors.
+
+```bash
+# Check recent error logs
+curl "http://localhost:3001/api/sync-logs?status=error&limit=10"
+
+# View detailed logs
+docker-compose logs -f duckdb-server | grep ERROR
+```
+</Accordion>
+
+### Incremental Sync Missing Records
+
+**Symptoms**: New records in MySQL are not appearing in DuckDB during incremental sync.
+
+<Warning>
+**Watermark Column Missing**: This is the most common cause. Tables without `updated_at`, `created_at`, or `timestamp` columns cannot use incremental sync.
+</Warning>
+
+<Accordion title="Solution 1: Verify Watermark Column">
+```bash
+# Check table structure for watermark columns
+docker exec duckling-server node scripts/mysql.js "DESCRIBE table_name"
+
+# Watermark columns (in priority order):
+# 1. updated_at / updatedAt / modified_at / modifiedAt
+# 2. created_at / createdAt
+# 3. timestamp
+```
+
+If no watermark column exists:
+
+```sql
+-- MySQL: Add updated_at column
+ALTER TABLE table_name ADD COLUMN updated_at TIMESTAMP 
+  DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
+
+-- Update existing rows
+UPDATE table_name SET updated_at = CURRENT_TIMESTAMP;
+```
+
+Then trigger a full sync to reset the watermark:
+
+```bash
+curl -X POST http://localhost:3001/api/sync/table/table_name
+```
+</Accordion>
+
+<Accordion title="Solution 2: Check Watermark Boundaries">
+**Cause**: Records at exact watermark boundary may be missed.
+
+<Note>
+Duckling uses `>=` operator (not `>`) to prevent boundary issues. This means the last synced record is re-processed each sync (safely handled by `INSERT OR REPLACE`).
+</Note>
+
+```bash
+# Verify watermark for table
+curl -X POST http://localhost:3001/api/query \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT * FROM sync_log WHERE table_name = 'table_name' ORDER BY created_at DESC LIMIT 1"}'
+```
+
+If watermark appears stuck, reset it:
+
+```bash
+# Reset watermark
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "DELETE FROM sync_log WHERE table_name = 'table_name'"}'
+
+# Trigger full sync
+curl -X POST http://localhost:3001/api/sync/table/table_name
+```
+</Accordion>
+
+<Accordion title="Solution 3: Force Full Sync">
+**Cause**: Incremental sync may have failed silently.
+
+```bash
+# Trigger full sync for specific table
+curl -X POST http://localhost:3001/api/sync/table/table_name
+
+# Or full sync for all tables
+curl -X POST http://localhost:3001/api/sync/full
+```
+</Accordion>
+
+### Duplicate Records
+
+**Symptoms**: Same record appears multiple times in DuckDB.
+
+<Accordion title="Solution 1: Check Primary Key">
+**Cause**: Table may be missing a primary key in MySQL.
+
+```bash
+# Verify primary key exists
+docker exec duckling-server node scripts/mysql.js "SHOW CREATE TABLE table_name"
+
+# Check for PRIMARY KEY constraint
+```
+
+<Warning>
+**No Primary Key**: Tables without primary keys can accumulate duplicates. The `INSERT OR REPLACE` upsert logic requires a primary key to identify duplicate records.
+</Warning>
+
+Add a primary key to the MySQL table:
+
+```sql
+-- MySQL: Add primary key
+ALTER TABLE table_name ADD PRIMARY KEY (id);
+```
+
+Then recreate the DuckDB table:
+
+```bash
+# Drop and recreate
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "DROP TABLE table_name"}'
+
+curl -X POST http://localhost:3001/api/sync/table/table_name
+```
+</Accordion>
+
+<Accordion title="Solution 2: Verify Deduplication Views">
+For fact tables (append-only), Duckling uses view-level deduplication:
+
+```bash
+# Check for duplicates
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "SELECT COUNT(*) as total, COUNT(DISTINCT id) as unique FROM table_name"}'
+
+# If duplicates exist, query the deduplicated view
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "SELECT * FROM table_name_dedup"}'
+```
+
+See [Schema Evolution](/guides/schema-evolution) for more on deduplication strategy.
+</Accordion>
+
+## Type Issues
+
+### BIGINT UNSIGNED Overflow
+
+**Symptoms**: Crash or error when syncing tables with very large unsigned BIGINT values.
+
+<Warning>
+**Known Limitation**: BIGINT UNSIGNED values above `9,223,372,036,854,775,807` (BIGINT_MAX) will overflow DuckDB's signed BIGINT type and crash the appender.
+</Warning>
+
+**Solution**: Use a smaller unsigned type or change to signed BIGINT:
+
+```sql
+-- MySQL: Change to signed BIGINT
+ALTER TABLE table_name MODIFY large_id BIGINT SIGNED;
+
+-- Or use DECIMAL for extremely large numbers
+ALTER TABLE table_name MODIFY large_id DECIMAL(20,0);
+```
+
+See [Type Support](/guides/type-support) for more details.
+
+### DECIMAL Precision Loss
+
+**Symptoms**: High-precision decimal values appear truncated in DuckDB.
+
+<Note>
+MySQL `DECIMAL(p,s)` maps to DuckDB's bare `DECIMAL` type. High-precision values may experience truncation depending on DuckDB's internal DECIMAL width.
+</Note>
+
+**Solution**: Verify precision requirements:
+
+```bash
+# Compare values
+docker exec duckling-server node scripts/mysql.js \
+  "SELECT decimal_column FROM table_name LIMIT 5"
+
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "SELECT decimal_column FROM table_name LIMIT 5"}'
+```
+
+If precision loss is unacceptable, consider storing as VARCHAR:
+
+```sql
+-- MySQL: Change to VARCHAR
+ALTER TABLE table_name MODIFY decimal_column VARCHAR(50);
+```
+
+### Binary Types in CDC
+
+**Symptoms**: Binary columns (BLOB, BINARY, VARBINARY) not updating during incremental sync or CDC.
+
+<Warning>
+**Binary Types & CDC**: Binary types break the `INSERT OR REPLACE` SQL path used by CDC updates. These types are only supported via full-sync Appender path.
+</Warning>
+
+**Solution**: Use full sync for tables with binary columns:
+
+```bash
+# Disable incremental sync for specific table
+# (requires code modification)
+
+# Or trigger periodic full syncs
+# Schedule via cron or external scheduler
+curl -X POST http://localhost:3001/api/sync/table/table_with_blobs
+```
+
+Alternatively, exclude binary columns from incremental sync by using a separate table.
+
+### JSON Stringification Issues
+
+**Symptoms**: JSON values not readable or malformed in DuckDB.
+
+**Solution**: Verify JSON validity:
+
+```bash
+# Check MySQL JSON
+docker exec duckling-server node scripts/mysql.js \
+  "SELECT json_column FROM table_name LIMIT 1"
+
+# Check DuckDB JSON
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "SELECT json_column::JSON FROM table_name LIMIT 1"}'
+```
+
+Duckling uses `JSON.stringify()` for conversion. Invalid JSON in MySQL will cause issues.
+
+### Spatial Types
+
+**Symptoms**: Spatial/geometry columns contain binary garbage in DuckDB.
+
+<Warning>
+**Spatial Types Not Supported**: MySQL spatial types (`POINT`, `LINESTRING`, `POLYGON`, `GEOMETRY`, etc.) fall through to VARCHAR with raw binary WKB representation.
+
+Tables with spatial columns will sync but the spatial data is not usable for spatial queries in DuckDB.
+</Warning>
+
+**Solution**: Exclude spatial tables or extract coordinates:
+
+```sql
+-- MySQL: Extract coordinates to separate columns
+ALTER TABLE locations 
+  ADD COLUMN lat DECIMAL(10,8),
+  ADD COLUMN lng DECIMAL(11,8);
+
+UPDATE locations 
+  SET lat = ST_Y(location),
+      lng = ST_X(location);
+```
+
+Then sync the lat/lng columns instead of the spatial type.
+
+## Connection Issues
+
+### MySQL Connection Timeouts
+
+**Symptoms**: Sync fails with "Connection timeout" or "Lost connection to MySQL server".
+
+<Accordion title="Solution 1: Increase Connection Pool Size">
+```bash
+# .env
+MYSQL_MAX_CONNECTIONS=10  # Default is 5
+
+# Restart
+docker-compose restart duckdb-server
+```
+</Accordion>
+
+<Accordion title="Solution 2: Check Network Connectivity">
+```bash
+# Test MySQL connection
+docker exec duckling-server node scripts/mysql.js "SELECT 1"
+
+# Check network latency
+ping mysql-host
+```
+</Accordion>
+
+<Accordion title="Solution 3: Adjust Batch Size">
+Large batch sizes can cause timeouts on slow connections:
+
+```bash
+# .env
+BATCH_SIZE=5000  # Default is 10000
+
+# Restart
+docker-compose restart duckdb-server
+```
+</Accordion>
+
+### DuckDB Lock Errors
+
+**Symptoms**: "database is locked" errors during queries.
+
+<Note>
+DuckDB uses file-based locking. Multiple processes or containers accessing the same `.db` file can cause lock contention.
+</Note>
+
+<Accordion title="Solution 1: Check Multiple Instances">
+```bash
+# Ensure only one server instance is running
+docker ps | grep duckling
+
+# Stop duplicate instances
+docker stop <container_id>
+```
+</Accordion>
+
+<Accordion title="Solution 2: Use Read Replicas">
+Enable read replicas to separate query workload from sync workload:
+
+```bash
+# .env
+READ_REPLICA_ENABLED=true
+REPLICA_REFRESH_INTERVAL=300  # 5 minutes
+
+# Restart
+docker-compose restart duckdb-server
+```
+</Accordion>
+
+<Accordion title="Solution 3: Check Disk Space">
+```bash
+# Check disk usage
+df -h
+
+# Check DuckDB file size
+du -h data/*.db
+```
+
+Low disk space can cause lock errors during writes.
+</Accordion>
+
+## Performance Issues
+
+### Slow Queries
+
+**Symptoms**: DuckDB queries taking longer than expected.
+
+<Accordion title="Solution 1: Use Column Projection">
+DuckDB is columnar - select only needed columns:
+
+```sql
+-- ❌ Slow: SELECT *
+SELECT * FROM large_table;
+
+-- ✅ Fast: SELECT specific columns
+SELECT id, name, created_at FROM large_table;
+```
+</Accordion>
+
+<Accordion title="Solution 2: Add Indexes">
+```sql
+-- Create index for frequently filtered columns
+CREATE INDEX idx_users_email ON users(email);
+CREATE INDEX idx_orders_created ON orders(created_at);
+```
+</Accordion>
+
+<Accordion title="Solution 3: Use Query Governor">
+Adjust concurrent query limits:
+
+```bash
+# .env
+MAX_CONCURRENT_QUERIES=20  # Default is 10
+QUERY_TIMEOUT_MS=60000     # Default is 30000 (30s)
+
+# Restart
+docker-compose restart duckdb-server
+```
+</Accordion>
+
+### Slow Sync
+
+**Symptoms**: Full sync taking hours for large tables.
+
+<Accordion title="Solution 1: Increase Batch Size">
+```bash
+# .env
+BATCH_SIZE=20000  # Default is 10000
+
+# For tables > 1M rows, try 20K-50K
+# Restart
+docker-compose restart duckdb-server
+```
+</Accordion>
+
+<Accordion title="Solution 2: Increase Worker Threads">
+```bash
+# .env
+WORKER_THREADS=8  # Default is CPU count - 1
+
+# Restart
+docker-compose restart duckdb-server
+```
+</Accordion>
+
+<Accordion title="Solution 3: Use Incremental Sync">
+Ensure incremental sync is enabled:
+
+```bash
+# .env
+ENABLE_INCREMENTAL_SYNC=true  # Default is true
+
+# Verify tables have watermark columns
+docker exec duckling-server node scripts/mysql.js "DESCRIBE table_name"
+```
+</Accordion>
+
+## Multi-Database Issues
+
+### Database Not Found
+
+**Symptoms**: API returns "Database not found" error.
+
+<Accordion title="Solution 1: Verify Database ID">
+```bash
+# List all configured databases
+curl http://localhost:3001/api/databases
+
+# Check database ID matches query parameter
+curl 'http://localhost:3001/api/tables?db=correct_id'
+```
+</Accordion>
+
+<Accordion title="Solution 2: Check databases.json">
+```bash
+# View database configuration
+cat data/databases.json
+
+# Ensure database entry exists with correct ID
+```
+</Accordion>
+
+<Accordion title="Solution 3: Test Database Connection">
+```bash
+# Test connection to specific database
+curl -X POST http://localhost:3001/api/databases/{id}/test
+```
+</Accordion>
+
+### Cross-Database Queries
+
+**Symptoms**: Cannot join tables from different databases.
+
+<Note>
+**Isolation by Design**: Each database is isolated with its own DuckDB file. Cross-database queries are not supported.
+</Note>
+
+**Workaround**: Replicate shared tables to both databases or use application-level joins.
+
+## Automation Issues
+
+### Auto-Sync Not Running
+
+**Symptoms**: Scheduled sync not executing automatically.
+
+<Accordion title="Solution 1: Verify Auto-Start Enabled">
+```bash
+# .env
+AUTO_START_SYNC=true  # Default is true
+
+# Check automation status
+curl http://localhost:3001/api/automation/status
+```
+</Accordion>
+
+<Accordion title="Solution 2: Check Sync Interval">
+```bash
+# .env
+SYNC_INTERVAL_MINUTES=15  # Default is 15
+
+# Restart to apply changes
+docker-compose restart duckdb-server
+```
+</Accordion>
+
+<Accordion title="Solution 3: Manually Start Automation">
+```bash
+# Start automation service
+curl -X POST http://localhost:3001/api/automation/start
+
+# Verify status
+curl http://localhost:3001/api/automation/status
+```
+</Accordion>
+
+### Backup Failures
+
+**Symptoms**: Automatic backups failing silently.
+
+<Accordion title="Solution 1: Check Disk Space">
+```bash
+# Verify sufficient disk space for backups
+df -h
+
+# Check backup directory
+du -sh data/backups/
+```
+</Accordion>
+
+<Accordion title="Solution 2: Verify Backup Configuration">
+```bash
+# .env
+AUTO_BACKUP=true
+BACKUP_INTERVAL_HOURS=24
+BACKUP_RETENTION_DAYS=7
+
+# Restart
+docker-compose restart duckdb-server
+```
+</Accordion>
+
+<Accordion title="Solution 3: Trigger Manual Backup">
+```bash
+# Test backup manually
+curl -X POST http://localhost:3001/api/automation/backup
+
+# Check logs for errors
+docker-compose logs -f duckdb-server | grep backup
+```
+</Accordion>
+
+## Debugging Tips
+
+### Enable Debug Logging
+
+```bash
+# .env
+LOG_LEVEL=debug  # Default is info
+
+# Restart
+docker-compose restart duckdb-server
+
+# View logs
+docker-compose logs -f duckdb-server
+```
+
+### Check Health Endpoint
+
+```bash
+# System health check
+curl http://localhost:3001/health
+
+# Detailed status
+curl http://localhost:3001/status
+
+# Sync metrics
+curl http://localhost:3001/metrics
+```
+
+### Validate Data Integrity
+
+```bash
+# Compare MySQL vs DuckDB counts
+curl http://localhost:3001/api/sync/validate
+
+# Check specific table
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "SELECT COUNT(*) FROM table_name"}'
+
+docker exec duckling-server node scripts/mysql.js \
+  "SELECT COUNT(*) FROM table_name"
+```
+
+### Export Logs for Support
+
+```bash
+# Export recent logs
+docker-compose logs --tail=500 duckdb-server > duckling-logs.txt
+
+# Export sync logs
+curl "http://localhost:3001/api/sync-logs?limit=100" > sync-logs.json
+
+# Export configuration
+cat .env > config.txt
+cat data/databases.json >> config.txt
+```
+
+## Related Topics
+
+- [Debugging](/guides/debugging) - Detailed debugging procedures
+- [Type Support](/guides/type-support) - Type mapping reference
+- [Schema Evolution](/guides/schema-evolution) - Schema change handling

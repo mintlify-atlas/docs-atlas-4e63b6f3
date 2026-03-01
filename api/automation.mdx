@@ -1,0 +1,413 @@
+---
+title: 'Automation & Backup'
+description: 'Automated sync, cleanup, backup, and recovery endpoints'
+---
+
+## Overview
+
+Duckling provides comprehensive automation for zero manual intervention. All automation features are **enabled by default** and support multi-database operations.
+
+## Features
+
+<CardGroup cols={2}>
+  <Card title="Auto Sync" icon="arrows-rotate">
+    Incremental sync every 15 minutes (configurable)
+  </Card>
+  <Card title="Auto Backup" icon="cloud-arrow-up">
+    Daily local and S3 backups with retention policies
+  </Card>
+  <Card title="Auto Cleanup" icon="broom">
+    Daily storage cleanup and maintenance
+  </Card>
+  <Card title="Auto Recovery" icon="heart-pulse">
+    Health monitoring and auto-restart on failures
+  </Card>
+</CardGroup>
+
+## Endpoints
+
+### GET /automation/status
+
+Get automation service status for a specific database.
+
+**Authentication:** Required
+
+**Query Parameters:**
+<ParamField query="db" type="string">
+  Database ID (defaults to `default` if omitted)
+</ParamField>
+
+**Request Example:**
+```bash
+curl 'http://localhost:3001/automation/status?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "status": {
+    "isRunning": true,
+    "syncInterval": 15,
+    "lastSync": "2024-01-20T10:30:00Z",
+    "nextSync": "2024-01-20T10:45:00Z",
+    "backupEnabled": true,
+    "lastBackup": "2024-01-20T00:00:00Z",
+    "nextBackup": "2024-01-21T00:00:00Z",
+    "cleanupEnabled": true,
+    "lastCleanup": "2024-01-20T00:00:00Z",
+    "nextCleanup": "2024-01-21T00:00:00Z",
+    "healthMonitoring": true,
+    "healthCheckInterval": 60
+  },
+  "architecture": "sequential-appender"
+}
+```
+
+<ResponseField name="isRunning" type="boolean">
+  Whether automation service is active
+</ResponseField>
+
+<ResponseField name="syncInterval" type="number">
+  Sync interval in minutes (default: 15)
+</ResponseField>
+
+<ResponseField name="lastSync" type="string">
+  Timestamp of last sync operation
+</ResponseField>
+
+<ResponseField name="backupEnabled" type="boolean">
+  Whether automatic backups are enabled
+</ResponseField>
+
+<ResponseField name="healthMonitoring" type="boolean">
+  Whether health monitoring is active
+</ResponseField>
+
+---
+
+### POST /automation/start
+
+Start automation service (sync, backup, cleanup, health monitoring).
+
+**Authentication:** Required
+
+**Query Parameters:**
+<ParamField query="db" type="string">
+  Database ID (defaults to `default` if omitted)
+</ParamField>
+
+**Request Example:**
+```bash
+curl -X POST 'http://localhost:3001/automation/start?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Automation service started successfully"
+}
+```
+
+<Info>
+  Automation starts automatically on server boot if `AUTO_START_SYNC=true` (default).
+</Info>
+
+---
+
+### POST /automation/stop
+
+Stop automation service.
+
+**Authentication:** Required
+
+**Query Parameters:**
+<ParamField query="db" type="string">
+  Database ID (defaults to `default` if omitted)
+</ParamField>
+
+**Request Example:**
+```bash
+curl -X POST 'http://localhost:3001/automation/stop?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Automation service stopped successfully"
+}
+```
+
+<Warning>
+  Stopping automation will pause automatic syncs, backups, and health monitoring until restarted.
+</Warning>
+
+---
+
+### POST /automation/backup
+
+Trigger manual backup (local + S3 if configured).
+
+**Authentication:** Required
+
+**Query Parameters:**
+<ParamField query="db" type="string">
+  Database ID (defaults to `default` if omitted)
+</ParamField>
+
+**Request Example:**
+```bash
+curl -X POST 'http://localhost:3001/automation/backup?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Manual backup completed successfully"
+}
+```
+
+**Backup Contents:**
+- DuckDB database file (`duckling-{db}.db`)
+- Metadata tables (watermarks, sync logs)
+- S3 upload (if S3 is configured)
+
+**Backup Location:**
+- **Local:** `data/backups/backup-{db}-{timestamp}/`
+- **S3:** `s3://{bucket}/{pathPrefix}/backup-{timestamp}.db.enc` (if S3 enabled)
+
+---
+
+### POST /automation/restore
+
+Restore from latest local backup.
+
+**Authentication:** Required
+
+**Query Parameters:**
+<ParamField query="db" type="string">
+  Database ID (defaults to `default` if omitted)
+</ParamField>
+
+**Request Example:**
+```bash
+curl -X POST 'http://localhost:3001/automation/restore?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Restore from backup completed successfully"
+}
+```
+
+<Warning>
+  Restore will **replace** the current DuckDB database with the backup. This operation is irreversible.
+</Warning>
+
+---
+
+### POST /automation/cleanup
+
+Trigger manual cleanup (VACUUM, WAL cleanup, old logs).
+
+**Authentication:** Required
+
+**Query Parameters:**
+<ParamField query="db" type="string">
+  Database ID (defaults to `default` if omitted)
+</ParamField>
+
+**Request Example:**
+```bash
+curl -X POST 'http://localhost:3001/automation/cleanup?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Manual cleanup completed successfully"
+}
+```
+
+**Cleanup Tasks:**
+- DuckDB VACUUM (reclaim disk space)
+- WAL file cleanup
+- Old backup rotation (keeps last 7 days by default)
+- Sync log cleanup (keeps last 90 days by default)
+
+---
+
+## S3 Backup Endpoints
+
+### GET /api/backups
+
+List all backups (local + S3) for a database.
+
+**Authentication:** Required
+
+**Query Parameters:**
+<ParamField query="db" type="string">
+  Database ID (defaults to `default` if omitted)
+</ParamField>
+
+**Request Example:**
+```bash
+curl 'http://localhost:3001/api/backups?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "backups": [
+    {
+      "name": "backup-lms-2024-01-20T00:00:00",
+      "location": "local",
+      "size": 5242880,
+      "lastModified": "2024-01-20T00:00:00Z",
+      "key": "backup-lms-2024-01-20T00:00:00"
+    },
+    {
+      "name": "backup-2024-01-20T00:00:00.db.enc",
+      "location": "s3",
+      "size": 5000000,
+      "lastModified": "2024-01-20T00:05:00Z",
+      "key": "lms/backup-2024-01-20T00:00:00.db.enc"
+    }
+  ]
+}
+```
+
+---
+
+### POST /api/backups/s3
+
+Trigger immediate S3 backup.
+
+**Authentication:** Required
+
+**Query Parameters:**
+<ParamField query="db" type="string">
+  Database ID (defaults to `default` if omitted)
+</ParamField>
+
+**Request Example:**
+```bash
+curl -X POST 'http://localhost:3001/api/backups/s3?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "key": "lms/backup-2024-01-20T10:30:00.db.enc",
+  "message": "Backup uploaded to S3: lms/backup-2024-01-20T10:30:00.db.enc"
+}
+```
+
+<Info>
+  S3 backups are encrypted with AES-256-CTR if `encryption: 'client-aes256'` is configured.
+</Info>
+
+---
+
+### POST /api/backups/s3/restore
+
+Restore from a specific S3 backup.
+
+**Authentication:** Required
+
+**Query Parameters:**
+<ParamField query="db" type="string">
+  Database ID (defaults to `default` if omitted)
+</ParamField>
+
+**Request Body:**
+<ParamField body="key" type="string" required>
+  S3 object key of the backup to restore
+</ParamField>
+
+**Request Example:**
+```bash
+curl -X POST 'http://localhost:3001/api/backups/s3/restore?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "key": "lms/backup-2024-01-20T00:00:00.db.enc"
+  }'
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Database restored from S3 backup successfully"
+}
+```
+
+<Warning>
+  S3 restore requires temporary disk space (~same size as backup) during decryption. Ensure sufficient disk space.
+</Warning>
+
+---
+
+## Environment Configuration
+
+Configure automation via environment variables:
+
+```bash
+# Sync Configuration
+AUTO_START_SYNC=true              # Auto-start sync on boot (default: true)
+SYNC_INTERVAL_MINUTES=15          # Sync frequency (default: 15)
+ENABLE_INCREMENTAL_SYNC=true      # Enable incremental sync (default: true)
+
+# Backup Configuration
+AUTO_BACKUP=true                  # Enable auto backups (default: true)
+BACKUP_INTERVAL_HOURS=24          # Backup frequency (default: 24)
+BACKUP_RETENTION_DAYS=7           # Local backup retention (default: 7)
+
+# Cleanup Configuration
+AUTO_CLEANUP=true                 # Enable auto cleanup (default: true)
+CLEANUP_INTERVAL_HOURS=24         # Cleanup frequency (default: 24)
+RETENTION_DAYS=90                 # Log retention (default: 90)
+
+# Health Monitoring
+AUTO_RESTART=true                 # Enable auto-restart (default: true)
+MAX_RESTART_ATTEMPTS=3            # Max recovery attempts (default: 3)
+```
+
+---
+
+## Automation Schedule
+
+| Task | Default Frequency | Configurable |
+|------|-------------------|-------------|
+| **Incremental Sync** | Every 15 minutes | `SYNC_INTERVAL_MINUTES` |
+| **Local Backup** | Daily at midnight | `BACKUP_INTERVAL_HOURS` |
+| **S3 Backup** | Daily at midnight | `s3BackupIntervalHours` (per database) |
+| **Cleanup** | Daily at midnight | `CLEANUP_INTERVAL_HOURS` |
+| **Health Check** | Every 60 seconds | Fixed |
+
+---
+
+## Best Practices
+
+1. **Enable S3 Backups** - Configure S3 for disaster recovery (especially for large databases 200GB+)
+2. **Monitor Logs** - Check `/automation/status` regularly for failed operations
+3. **Test Restores** - Periodically test backup restoration to verify integrity
+4. **Adjust Intervals** - Tune sync and backup intervals based on data change rate
+5. **Use Encryption** - Enable `client-aes256` encryption for sensitive data in S3

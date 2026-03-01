@@ -1,0 +1,469 @@
+---
+title: 'Docker Deployment'
+description: 'Deploy Duckling using Docker and Docker Compose'
+icon: 'docker'
+---
+
+## Overview
+
+Duckling provides production-ready Docker images with multi-stage builds for optimal size and security. Both development and production environments use Docker for consistency.
+
+## Quick Start
+
+### Development Environment
+
+The development environment uses docker-compose with hot reload enabled:
+
+```bash
+# Start all services
+docker-compose up -d
+
+# View server logs
+docker-compose logs -f duckdb-server
+
+# View frontend logs
+docker-compose logs -f duckdb-frontend
+
+# Stop all services
+docker-compose down
+```
+
+**Service URLs:**
+- Server: http://localhost:3001 (backend API)
+- Frontend: http://localhost:3000 (Nuxt 4 dashboard)
+- MySQL Protocol: localhost:3307 (MySQL-compatible wire protocol)
+
+### Production Deployment
+
+```bash
+# Build production image
+docker build -f Dockerfile -t duckling:latest .
+
+# Run production container
+docker run -d \
+  --name duckling \
+  -p 3000:3000 \
+  -p 3307:3307 \
+  -v ./data:/app/data \
+  -v ./logs:/app/logs \
+  --env-file .env \
+  duckling:latest
+```
+
+## Docker Compose Configuration
+
+The `docker-compose.yml` defines two services for development:
+
+### Server Service
+
+```yaml
+services:
+  duckdb-server:
+    container_name: duckling-server
+    build:
+      context: .
+      dockerfile: docker/server.Dockerfile
+    ports:
+      - "3001:3000"  # HTTP API
+      - "3307:3307"  # MySQL protocol
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data       # DuckDB database files
+      - ./logs:/app/logs       # Application logs
+      # Hot reload source mounts
+      - ./packages/server/src:/app/packages/server/src
+      - ./packages/shared/src:/app/packages/shared/src
+    restart: unless-stopped
+    networks:
+      - duckdb-network
+```
+
+**Key Configuration:**
+- **Port 3001**: HTTP API server
+- **Port 3307**: MySQL wire protocol (connect with any MySQL client)
+- **Volume `/app/data`**: Persistent storage for DuckDB files and `databases.json`
+- **Volume `/app/logs`**: Application logs
+- **Hot Reload**: Source code mounted for development
+
+### Frontend Service
+
+```yaml
+  duckdb-frontend:
+    container_name: duckling-frontend
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - NUXT_PUBLIC_API_BASE=http://localhost:3001
+    volumes:
+      # Hot reload - mount source code
+      - ./packages/frontend/app:/app/packages/frontend/app
+      - ./packages/frontend/nuxt.config.ts:/app/packages/frontend/nuxt.config.ts
+    restart: unless-stopped
+    depends_on:
+      - duckdb-server
+    networks:
+      - duckdb-network
+```
+
+### Network Configuration
+
+```yaml
+networks:
+  duckdb-network:
+    name: duckling-network
+    driver: bridge
+```
+
+Both services communicate over a dedicated bridge network for isolation.
+
+## Production Dockerfile
+
+The production Dockerfile uses a multi-stage build for efficiency:
+
+### Stage 1: Builder
+
+```dockerfile
+FROM node:20-slim AS builder
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    python3 \
+    make \
+    g++ \
+    libsqlite3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install pnpm
+RUN npm install -g pnpm@10.0.0
+
+# Copy workspace config
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml .npmrc ./
+COPY packages/shared/package.json ./packages/shared/
+COPY packages/server/package.json ./packages/server/
+COPY packages/frontend/package.json ./packages/frontend/
+
+# Install dependencies
+RUN pnpm install --frozen-lockfile --shamefully-hoist && pnpm rebuild
+
+# Copy source and build
+COPY packages/shared ./packages/shared
+COPY packages/server ./packages/server
+COPY packages/frontend ./packages/frontend
+
+RUN pnpm build:shared && \
+    pnpm build:server && \
+    pnpm build:frontend
+```
+
+### Stage 2: Production Runtime
+
+```dockerfile
+FROM node:20-slim AS production
+
+WORKDIR /app
+
+# Install runtime dependencies only
+RUN apt-get update && apt-get install -y \
+    libsqlite3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g pnpm@10.0.0
+
+# Copy workspace config
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml .npmrc ./
+COPY packages/shared/package.json ./packages/shared/
+COPY packages/server/package.json ./packages/server/
+
+# Install production dependencies only
+RUN pnpm install --prod --frozen-lockfile --shamefully-hoist
+
+# Copy built artifacts
+COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
+COPY --from=builder /app/packages/server/dist ./packages/server/dist
+
+# Copy frontend build to server's public directory
+RUN rm -rf ./packages/server/public
+COPY --from=builder /app/packages/frontend/.output/public ./packages/server/public
+
+# Create data directories
+RUN mkdir -p /var/lib/duckdb /app/data /app/logs
+
+# Set production environment
+ENV NODE_ENV=production
+ENV NODE_OPTIONS="--max-old-space-size=8192 --expose-gc"
+
+EXPOSE 3000
+
+CMD ["pnpm", "start:server"]
+```
+
+**Production Optimizations:**
+- **Multi-stage build**: Separates build dependencies from runtime
+- **Single executable**: Server serves both API and frontend
+- **8GB heap**: `--max-old-space-size=8192` for large sync operations
+- **Manual GC**: `--expose-gc` for memory cleanup
+- **Production deps only**: No devDependencies in final image
+
+## Volume Mounts
+
+### Required Volumes
+
+<ParamField path="/app/data" type="directory" required>
+  **DuckDB database files and configuration**
+  
+  - `databases.json` - Multi-database configuration
+  - `{database_id}.db` - DuckDB database files
+  - `backups/` - Local backup directory
+  - `metadata/` - Watermark and sync metadata
+  
+  **Host Mount**: `./data:/app/data`
+</ParamField>
+
+<ParamField path="/app/logs" type="directory">
+  **Application logs**
+  
+  Winston-based structured logs for debugging and monitoring.
+  
+  **Host Mount**: `./logs:/app/logs`
+</ParamField>
+
+### Development Volumes (Hot Reload)
+
+In development mode, source code is mounted for hot reload:
+
+```yaml
+volumes:
+  # Server hot reload
+  - ./packages/server/src:/app/packages/server/src
+  - ./packages/shared/src:/app/packages/shared/src
+  
+  # Frontend hot reload
+  - ./packages/frontend/app:/app/packages/frontend/app
+  - ./packages/frontend/nuxt.config.ts:/app/packages/frontend/nuxt.config.ts
+```
+
+<Note>
+  **Hot Reload**: Changes to `.ts` and `.vue` files automatically apply without container restart.
+  
+  - Server uses nodemon (auto-restart)
+  - Frontend uses Nuxt HMR (hot module replacement)
+</Note>
+
+## Port Mapping
+
+<ParamField path="3000" type="port" required>
+  **HTTP Server Port**
+  
+  Main API and frontend serving port.
+  
+  - Development: `3001:3000` (server), `3000:3000` (frontend)
+  - Production: `3000:3000` (single container)
+</ParamField>
+
+<ParamField path="3307" type="port">
+  **MySQL Protocol Port**
+  
+  MySQL wire protocol compatibility.
+  
+  Connect using any MySQL client:
+  ```bash
+  mysql -h localhost -P 3307 -u duckling -p
+  ```
+  
+  Defaults to using `DUCKLING_API_KEY` as password.
+</ParamField>
+
+## Networking
+
+### Bridge Network
+
+Services communicate over a dedicated bridge network:
+
+```yaml
+networks:
+  duckdb-network:
+    name: duckling-network
+    driver: bridge
+```
+
+**Inter-service communication:**
+- Frontend → Server: `http://duckdb-server:3000`
+- External → Server: `http://localhost:3001`
+- External → Frontend: `http://localhost:3000`
+
+## Docker Commands
+
+### Development
+
+```bash
+# Start services
+docker-compose up -d
+
+# Rebuild after package.json changes
+docker-compose up -d --build
+
+# View logs
+docker-compose logs -f duckdb-server
+docker-compose logs -f duckdb-frontend
+
+# Execute commands inside container
+docker exec duckling-server pnpm run build:server
+docker exec duckling-server node packages/server/dist/cli.js health
+
+# Stop services
+docker-compose down
+
+# Remove volumes (data loss!)
+docker-compose down -v
+```
+
+### Production
+
+```bash
+# Build image
+docker build -t duckling:latest .
+
+# Run container
+docker run -d \
+  --name duckling \
+  -p 3000:3000 \
+  -p 3307:3307 \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/logs:/app/logs \
+  --env-file .env \
+  --restart unless-stopped \
+  duckling:latest
+
+# View logs
+docker logs -f duckling
+
+# Execute CLI commands
+docker exec duckling node packages/server/dist/cli.js status
+
+# Stop container
+docker stop duckling
+
+# Remove container
+docker rm duckling
+```
+
+## When to Rebuild
+
+<Warning>
+  **DO rebuild** (`--build` flag) when:
+  - Adding/removing npm packages (package.json changes)
+  - Changing Dockerfile or docker-compose.yml
+  - Updating system dependencies (apt packages)
+  - Major structural changes (monorepo reorganization)
+</Warning>
+
+<Note>
+  **DON'T rebuild** for:
+  - Code changes in `.ts` or `.vue` files (hot reload)
+  - Configuration changes in `.env` files
+  - View/template changes in `public/` directory
+  - Component changes in frontend `app/` directory
+</Note>
+
+## Health Checks
+
+Add Docker health checks for production:
+
+```yaml
+services:
+  duckdb-server:
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+```
+
+## Resource Limits
+
+Recommended resource limits for production:
+
+```yaml
+services:
+  duckdb-server:
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 16G
+        reservations:
+          cpus: '2'
+          memory: 8G
+```
+
+**Memory Guidelines:**
+- **Minimum**: 4GB for small databases (&lt;10GB)
+- **Recommended**: 8-16GB for production workloads
+- **Large datasets**: 16-32GB for 100GB+ databases
+
+## Troubleshooting
+
+### Container won't start
+
+```bash
+# Check logs
+docker-compose logs duckdb-server
+
+# Check environment variables
+docker-compose config
+
+# Verify volumes exist
+ls -la ./data ./logs
+```
+
+### Hot reload not working
+
+```bash
+# Restart container
+docker-compose restart duckdb-server
+
+# Check volume mounts
+docker inspect duckling-server | grep Mounts -A 20
+```
+
+### Permission issues
+
+```bash
+# Fix data directory permissions
+sudo chown -R $USER:$USER ./data ./logs
+
+# Or run with correct user
+docker-compose run --user $(id -u):$(id -g) duckdb-server
+```
+
+### Out of memory
+
+```bash
+# Increase Node.js heap size
+ENV NODE_OPTIONS="--max-old-space-size=16384"
+
+# Increase Docker memory limit
+docker update --memory 16g duckling
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="gear" href="/deployment/configuration">
+    Configure environment variables and settings
+  </Card>
+  <Card title="Production Guide" icon="server" href="/deployment/production">
+    Production deployment best practices
+  </Card>
+  <Card title="Security" icon="shield" href="/deployment/security">
+    Secure your Duckling deployment
+  </Card>
+</CardGroup>

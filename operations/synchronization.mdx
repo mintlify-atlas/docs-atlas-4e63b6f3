@@ -1,0 +1,370 @@
+---
+title: 'Synchronization Operations'
+description: 'Data sync operations, watermark-based incremental sync, and monitoring for Duckling'
+---
+
+## Overview
+
+Duckling uses **watermark-based incremental sync** to efficiently replicate changes from MySQL to DuckDB. The system automatically syncs data every 15 minutes by default, with zero manual intervention required.
+
+## Automatic Synchronization
+
+### Default Behavior
+
+Synchronization is **enabled by default** and starts automatically when the server boots:
+
+- **Sync Interval**: Every 15 minutes (`SYNC_INTERVAL_MINUTES=15`)
+- **Auto-Start**: Enabled by default (`AUTO_START_SYNC=true`)
+- **Incremental Mode**: Enabled by default (`ENABLE_INCREMENTAL_SYNC=true`)
+- **Initial Delay**: 5 seconds after server start
+
+<Note>
+The first sync runs 5 seconds after server startup, then repeats every 15 minutes automatically.
+</Note>
+
+### Disabling Automatic Sync
+
+To disable automatic synchronization, set the following environment variable:
+
+```bash
+AUTO_START_SYNC=false
+```
+
+## Sync Types
+
+### Full Sync
+
+Replaces all data in DuckDB with a fresh copy from MySQL.
+
+**When to use:**
+- Initial database setup
+- After schema changes
+- Recovery from data corruption
+- Manual data refresh
+
+**API Endpoint:**
+```bash
+curl -X POST http://localhost:3001/api/sync/full?db=your-database-id \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+```
+
+**CLI Command:**
+```bash
+docker exec duckling-server node packages/server/dist/cli.js sync
+```
+
+### Incremental Sync
+
+Syncs only records that changed since the last sync using watermark tracking.
+
+**When to use:**
+- Regular scheduled updates (default)
+- Low-latency data replication
+- Efficient bandwidth usage
+
+**API Endpoint:**
+```bash
+curl -X POST http://localhost:3001/api/sync/incremental?db=your-database-id \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+```
+
+**CLI Command:**
+```bash
+docker exec duckling-server node packages/server/dist/cli.js sync-incremental
+```
+
+### Table-Specific Sync
+
+Sync a single table on demand.
+
+**API Endpoint:**
+```bash
+curl -X POST http://localhost:3001/api/sync/table/User?db=your-database-id \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+```
+
+## Watermark-Based Incremental Sync
+
+### How Watermarks Work
+
+Duckling tracks the last processed timestamp for each table:
+
+<Steps>
+  <Step title="Detect Timestamp Column">
+    System automatically detects the appropriate timestamp column using priority:
+    
+    1. `updatedAt` / `updated_at` / `modifiedAt` / `modified_at` (highest priority)
+    2. `createdAt` / `created_at` (fallback)
+    3. `timestamp` (final fallback)
+  </Step>
+  
+  <Step title="Fetch Changes">
+    Query MySQL for records changed since last watermark:
+    
+    ```sql
+    SELECT * FROM TableName 
+    WHERE updatedAt >= '2025-10-30 12:00:00'
+    ORDER BY updatedAt ASC
+    LIMIT 1000
+    ```
+  </Step>
+  
+  <Step title="Update DuckDB">
+    Apply changes using `INSERT OR REPLACE` for upsert behavior
+  </Step>
+  
+  <Step title="Update Watermark">
+    Store new watermark timestamp in sync_log table
+  </Step>
+</Steps>
+
+### Timestamp Detection Priority
+
+| Priority | Column Names | Use Case | Behavior |
+|----------|-------------|----------|----------|
+| 1 | `updatedAt`, `updated_at`, `modifiedAt`, `modified_at` | Tables with updates | Captures inserts + updates |
+| 2 | `createdAt`, `created_at` | Append-only tables | Captures new records only |
+| 3 | `timestamp` | Legacy systems | Generic timestamp tracking |
+
+<Info>
+The system uses `>=` (not `>`) in watermark queries to prevent data loss at timestamp boundaries. This means the last record is re-processed each sync, but `INSERT OR REPLACE` handles this idempotently.
+</Info>
+
+### INSERT OR REPLACE Behavior
+
+Incremental sync uses `INSERT OR REPLACE` for automatic upsert:
+
+```typescript
+INSERT OR REPLACE INTO TableName (col1, col2, ...) 
+VALUES (?, ?, ...)
+```
+
+**How it works:**
+- If primary key exists: **REPLACE** entire row (update)
+- If primary key is new: **INSERT** new row
+- Result: No duplicates, updates propagate automatically
+
+**Benefits:**
+- No duplicates (primary key constraint enforced)
+- Updates propagate automatically
+- Idempotent (safe to re-process records)
+- Works with `>=` operator for boundary safety
+
+## Sync Configuration
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SYNC_INTERVAL_MINUTES` | `15` | Minutes between automatic syncs |
+| `AUTO_START_SYNC` | `true` | Auto-start sync on server boot |
+| `ENABLE_INCREMENTAL_SYNC` | `true` | Enable incremental mode |
+| `BATCH_SIZE` | `1000` | Records per batch from MySQL |
+| `INSERT_BATCH_SIZE` | `2000` | Records per INSERT batch |
+| `APPENDER_FLUSH_INTERVAL` | `5000` | Appender flush interval (ms) |
+| `MAX_RETRIES` | `3` | Retry attempts for failed operations |
+| `EXCLUDED_TABLES` | `""` | Comma-separated list of tables to exclude |
+
+### Excluding Tables
+
+To exclude specific tables from synchronization:
+
+```bash
+EXCLUDED_TABLES="audit_logs,temp_data,session_cache"
+```
+
+<Warning>
+Excluded tables will not be created or synced in DuckDB. Changes to this setting require a server restart.
+</Warning>
+
+## Monitoring Sync Operations
+
+### Sync Status Endpoint
+
+Get current sync state and recent activity:
+
+```bash
+curl http://localhost:3001/api/sync/status?db=your-database-id \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+```
+
+**Response:**
+```json
+{
+  "status": "idle",
+  "lastSync": "2026-03-01T10:30:00.000Z",
+  "nextSync": "2026-03-01T10:45:00.000Z",
+  "recentLogs": [
+    {
+      "table_name": "User",
+      "sync_type": "watermark",
+      "records_processed": 127,
+      "duration_ms": 234,
+      "status": "success"
+    }
+  ]
+}
+```
+
+### Sync Logs
+
+View detailed sync history:
+
+```bash
+# Recent syncs
+curl "http://localhost:3001/api/sync-logs?limit=20&db=your-database-id" \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+
+# Failed syncs only
+curl "http://localhost:3001/api/sync-logs?status=error&limit=10&db=your-database-id" \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+
+# Specific table history
+curl "http://localhost:3001/api/sync-logs?table=User&limit=50&db=your-database-id" \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+```
+
+### Sync Log Schema
+
+Each sync operation is logged with:
+
+```sql
+CREATE TABLE sync_log (
+  id INTEGER PRIMARY KEY,
+  table_name VARCHAR,
+  sync_type VARCHAR,           -- 'watermark', 'sequential', 'full'
+  records_processed INTEGER,
+  duration_ms INTEGER,
+  status VARCHAR,              -- 'success', 'error'
+  error_message VARCHAR,
+  watermark_before VARCHAR,    -- JSON snapshot
+  watermark_after VARCHAR,     -- JSON snapshot
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### Validation
+
+Compare record counts between MySQL and DuckDB:
+
+```bash
+curl http://localhost:3001/api/sync/validate?db=your-database-id \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+```
+
+**Response:**
+```json
+{
+  "tables": [
+    {
+      "table": "User",
+      "mysqlCount": 10523,
+      "duckdbCount": 10523,
+      "match": true
+    },
+    {
+      "table": "Order",
+      "mysqlCount": 45231,
+      "duckdbCount": 45230,
+      "match": false,
+      "difference": -1
+    }
+  ],
+  "summary": {
+    "total": 42,
+    "matches": 41,
+    "mismatches": 1
+  }
+}
+```
+
+<Warning>
+Mismatches may indicate sync failures, ongoing transactions in MySQL, or excluded records. Investigate using sync logs.
+</Warning>
+
+## Performance Optimization
+
+See [Performance Tuning](/operations/performance-tuning) for detailed optimization strategies including:
+
+- Batch size tuning
+- Worker thread configuration
+- Network optimization
+- Query performance
+
+## Troubleshooting
+
+### Sync Not Running
+
+<Steps>
+  <Step title="Check Automation Status">
+    ```bash
+    curl http://localhost:3001/api/automation/status?db=your-database-id \
+      -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+    ```
+  </Step>
+  
+  <Step title="Verify Configuration">
+    Ensure `AUTO_START_SYNC=true` in environment variables
+  </Step>
+  
+  <Step title="Check Server Logs">
+    ```bash
+    docker-compose logs -f duckdb-server | grep -i sync
+    ```
+  </Step>
+  
+  <Step title="Manual Trigger">
+    Test with manual sync:
+    ```bash
+    curl -X POST http://localhost:3001/api/sync/incremental?db=your-database-id \
+      -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+    ```
+  </Step>
+</Steps>
+
+### Sync Errors
+
+Check sync logs for errors:
+
+```bash
+curl "http://localhost:3001/api/sync-logs?status=error&db=your-database-id" \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+```
+
+Common errors:
+- **Connection timeout**: Check MySQL network connectivity
+- **Schema mismatch**: Run full sync to refresh schema
+- **Lock timeout**: Reduce batch size or sync during off-peak hours
+
+### Data Mismatches
+
+If validation shows mismatches:
+
+1. Check if tables are excluded: `EXCLUDED_TABLES` environment variable
+2. Review sync logs for the affected table
+3. Check for active transactions in MySQL
+4. Run full sync for affected tables
+
+## Multi-Database Support
+
+All sync endpoints support the `?db={database_id}` parameter:
+
+```bash
+# Sync specific database
+curl -X POST 'http://localhost:3001/api/sync/incremental?db=lms' \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+
+# Check status for specific database
+curl 'http://localhost:3001/api/sync/status?db=analytics' \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+```
+
+<Info>
+Each database has its own sync schedule and watermarks. Multiple databases sync independently on staggered intervals to prevent resource contention.
+</Info>
+
+## Next Steps
+
+- [Monitoring](/operations/monitoring) - Set up health checks and metrics
+- [Backups](/operations/backups) - Configure automated backups
+- [Performance Tuning](/operations/performance-tuning) - Optimize sync performance

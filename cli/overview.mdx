@@ -1,0 +1,204 @@
+---
+title: CLI Overview
+description: Command-line interface for managing Duckling database synchronization
+---
+
+## Introduction
+
+The Duckling CLI provides a comprehensive set of commands for managing database synchronization between MySQL and DuckDB. All CLI commands run inside the Docker container and support multi-database operations.
+
+## Running CLI Commands
+
+Since Duckling runs in a Docker container, all CLI commands must be executed using `docker exec`:
+
+```bash
+docker exec duckling-server node packages/server/dist/cli.js <command> [options]
+```
+
+### Quick Examples
+
+<CodeGroup>
+```bash Health Check
+docker exec duckling-server node packages/server/dist/cli.js health
+```
+
+```bash Full Sync
+docker exec duckling-server node packages/server/dist/cli.js sync
+```
+
+```bash List Tables
+docker exec duckling-server node packages/server/dist/cli.js tables
+```
+
+```bash Execute Query
+docker exec duckling-server node packages/server/dist/cli.js query "SELECT COUNT(*) FROM User"
+```
+</CodeGroup>
+
+## Global Options
+
+All CLI commands support the following global options:
+
+<ParamField path="--database" type="string" default="first database">
+  Database ID to operate on. If not specified, uses the first configured database.
+  
+  ```bash
+  docker exec duckling-server node packages/server/dist/cli.js sync --database lms
+  ```
+</ParamField>
+
+<ParamField path="--help" type="flag">
+  Display help information for any command.
+  
+  ```bash
+  docker exec duckling-server node packages/server/dist/cli.js --help
+  docker exec duckling-server node packages/server/dist/cli.js sync --help
+  ```
+</ParamField>
+
+<ParamField path="--version" type="flag">
+  Display the CLI version.
+  
+  ```bash
+  docker exec duckling-server node packages/server/dist/cli.js --version
+  ```
+</ParamField>
+
+## Multi-Database Support
+
+Duckling supports managing multiple database replicas. Use the `--database` flag to specify which database to operate on:
+
+```bash
+# Sync the 'lms' database
+docker exec duckling-server node packages/server/dist/cli.js sync --database lms
+
+# Check health of 'analytics' database
+docker exec duckling-server node packages/server/dist/cli.js health --database analytics
+
+# Query the 'production' database
+docker exec duckling-server node packages/server/dist/cli.js query "SELECT * FROM orders" --database production
+```
+
+If no database is specified, the CLI operates on the first configured database.
+
+## Command Categories
+
+The CLI commands are organized into the following categories:
+
+### Synchronization Commands
+- `sync` - Run full synchronization
+- `sync-incremental` - Run incremental synchronization
+
+### Monitoring Commands
+- `health` - Check database connections
+- `status` - Show sync status with detailed metrics
+- `validate` - Validate sync integrity between MySQL and DuckDB
+
+### Database Operations
+- `tables` - List tables in both databases
+- `query` - Execute SQL queries on DuckDB
+
+### Dump Management
+- `dump-create` - Create a full database dump
+- `dump-restore` - Restore from a dump file
+- `dump-list` - List available dump files
+- `dump-cleanup` - Clean up old dump files
+
+## Common Workflows
+
+### Initial Setup
+
+1. **Health check** - Verify database connections
+2. **Full sync** - Initial data replication
+3. **Validate** - Confirm data integrity
+
+```bash
+# Step 1: Check connectivity
+docker exec duckling-server node packages/server/dist/cli.js health
+
+# Step 2: Run initial sync
+docker exec duckling-server node packages/server/dist/cli.js sync
+
+# Step 3: Validate the sync
+docker exec duckling-server node packages/server/dist/cli.js validate
+```
+
+### Daily Operations
+
+1. **Check status** - Monitor sync state
+2. **Incremental sync** - Update with recent changes
+3. **Query data** - Run analytical queries
+
+```bash
+# Check current status
+docker exec duckling-server node packages/server/dist/cli.js status
+
+# Run incremental update
+docker exec duckling-server node packages/server/dist/cli.js sync-incremental
+
+# Execute analytical query
+docker exec duckling-server node packages/server/dist/cli.js query "SELECT order_date, COUNT(*) FROM orders GROUP BY order_date"
+```
+
+### Backup & Restore
+
+1. **Create dump** - Regular backups
+2. **List dumps** - View available backups
+3. **Restore** - Recover from backup
+
+```bash
+# Create a backup
+docker exec duckling-server node packages/server/dist/cli.js dump-create
+
+# List available backups
+docker exec duckling-server node packages/server/dist/cli.js dump-list
+
+# Restore from backup
+docker exec duckling-server node packages/server/dist/cli.js dump-restore duckling_2025-03-01_120000.dump
+
+# Clean up old backups (older than 7 days)
+docker exec duckling-server node packages/server/dist/cli.js dump-cleanup 7
+```
+
+## Output Format
+
+Most CLI commands output JSON for easy parsing and integration with scripts:
+
+```bash
+# Pipe output to jq for formatting
+docker exec duckling-server node packages/server/dist/cli.js status | jq '.'
+
+# Save output to file
+docker exec duckling-server node packages/server/dist/cli.js validate > validation-report.json
+
+# Filter specific fields
+docker exec duckling-server node packages/server/dist/cli.js tables | jq '.duckdb'
+```
+
+## Error Handling
+
+The CLI returns appropriate exit codes:
+
+- `0` - Success
+- `1` - Error (check stderr for details)
+
+```bash
+# Check exit code
+docker exec duckling-server node packages/server/dist/cli.js health
+if [ $? -eq 0 ]; then
+  echo "Healthy"
+else
+  echo "Unhealthy"
+fi
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Commands Reference" icon="terminal" href="/cli/commands">
+    Detailed documentation for all CLI commands
+  </Card>
+  <Card title="API Reference" icon="code" href="/api-reference/overview">
+    RESTful API endpoints for programmatic access
+  </Card>
+</CardGroup>

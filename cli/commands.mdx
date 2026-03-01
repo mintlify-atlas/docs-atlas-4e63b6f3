@@ -1,0 +1,682 @@
+---
+title: CLI Commands Reference
+description: Complete reference for all Duckling CLI commands
+---
+
+## Synchronization Commands
+
+### sync
+
+Run a full synchronization from MySQL to DuckDB. This command replicates all tables and records from the source MySQL database.
+
+```bash
+docker exec duckling-server node packages/server/dist/cli.js sync
+```
+
+<ParamField path="--database" type="string" optional>
+  Database ID to sync. Defaults to the first configured database.
+</ParamField>
+
+**Example Output:**
+
+```json
+{
+  "status": "success",
+  "tablesProcessed": 45,
+  "totalRecords": 1234567,
+  "duration": 45000,
+  "timestamp": "2025-03-01T12:00:00.000Z"
+}
+```
+
+**Use Cases:**
+- Initial data replication
+- Reset DuckDB after schema changes
+- Recovery from data corruption
+
+**Performance:**
+- Uses DuckDB Appender API for 60,000+ rows/sec
+- Processes tables in batches to manage memory
+- Atomic transactions ensure data integrity
+
+---
+
+### sync-incremental
+
+Run an incremental synchronization using watermarks. Only syncs records that changed since the last sync.
+
+```bash
+docker exec duckling-server node packages/server/dist/cli.js sync-incremental
+```
+
+<ParamField path="--database" type="string" optional>
+  Database ID to sync. Defaults to the first configured database.
+</ParamField>
+
+**Example Output:**
+
+```json
+{
+  "status": "success",
+  "tablesProcessed": 45,
+  "totalRecords": 1523,
+  "duration": 2000,
+  "watermarksUpdated": 12,
+  "timestamp": "2025-03-01T12:15:00.000Z"
+}
+```
+
+**How It Works:**
+1. Detects timestamp columns (`updatedAt`, `createdAt`, or `timestamp`)
+2. Queries records with `WHERE timestamp >= lastWatermark`
+3. Uses `INSERT OR REPLACE` for automatic upsert
+4. Updates watermark after successful sync
+
+**Use Cases:**
+- Regular sync operations (every 15 minutes by default)
+- Low-latency updates for near real-time analytics
+- Efficient syncing for large databases
+
+---
+
+## Monitoring Commands
+
+### health
+
+Check database connections for both MySQL and DuckDB.
+
+```bash
+docker exec duckling-server node packages/server/dist/cli.js health
+```
+
+<ParamField path="--database" type="string" optional>
+  Database ID to check. Defaults to the first configured database.
+</ParamField>
+
+**Example Output:**
+
+```json
+{
+  "mysql": "healthy",
+  "duckdb": "healthy"
+}
+```
+
+**Exit Codes:**
+- `0` - Both databases are healthy
+- `1` - One or both databases are unhealthy
+
+**Use Cases:**
+- Container health checks in orchestration systems
+- Pre-deployment verification
+- Monitoring scripts
+
+---
+
+### status
+
+Show detailed sync status including table counts, watermarks, and sync history.
+
+```bash
+docker exec duckling-server node packages/server/dist/cli.js status
+```
+
+<ParamField path="--database" type="string" optional>
+  Database ID to check. Defaults to the first configured database.
+</ParamField>
+
+**Example Output:**
+
+```json
+{
+  "databaseId": "lms",
+  "isRunning": false,
+  "lastSync": "2025-03-01T12:00:00.000Z",
+  "tables": [
+    {
+      "name": "User",
+      "mysqlCount": 15234,
+      "duckdbCount": 15234,
+      "lastWatermark": "2025-03-01T11:59:00.000Z",
+      "syncType": "incremental"
+    },
+    {
+      "name": "Order",
+      "mysqlCount": 89765,
+      "duckdbCount": 89765,
+      "lastWatermark": "2025-03-01T11:58:30.000Z",
+      "syncType": "incremental"
+    }
+  ],
+  "totalTables": 45,
+  "uptime": 3600000
+}
+```
+
+**Use Cases:**
+- Dashboard data source
+- Monitoring sync lag
+- Troubleshooting sync issues
+
+---
+
+### validate
+
+Validate sync integrity by comparing record counts between MySQL and DuckDB.
+
+```bash
+docker exec duckling-server node packages/server/dist/cli.js validate
+```
+
+<ParamField path="--database" type="string" optional>
+  Database ID to validate. Defaults to the first configured database.
+</ParamField>
+
+**Example Output:**
+
+```json
+{
+  "valid": true,
+  "tables": [
+    {
+      "name": "User",
+      "mysqlCount": 15234,
+      "duckdbCount": 15234,
+      "valid": true
+    },
+    {
+      "name": "Order",
+      "mysqlCount": 89765,
+      "duckdbCount": 89762,
+      "valid": false,
+      "difference": -3
+    }
+  ],
+  "totalTables": 45,
+  "validTables": 44,
+  "invalidTables": 1
+}
+```
+
+**Use Cases:**
+- Post-sync verification
+- Data integrity audits
+- Troubleshooting missing records
+
+---
+
+## Database Operations
+
+### tables
+
+List all tables in both MySQL and DuckDB databases, showing any missing tables.
+
+```bash
+docker exec duckling-server node packages/server/dist/cli.js tables
+```
+
+<ParamField path="--database" type="string" optional>
+  Database ID to query. Defaults to the first configured database.
+</ParamField>
+
+**Example Output:**
+
+```json
+{
+  "mysql": [
+    "User",
+    "Workshop",
+    "Order",
+    "Product",
+    "_prisma_migrations"
+  ],
+  "duckdb": [
+    "User",
+    "Workshop",
+    "Order",
+    "Product"
+  ],
+  "missing": [
+    "_prisma_migrations"
+  ]
+}
+```
+
+**Notes:**
+- System tables (like `_prisma_migrations`) may be excluded from sync
+- Missing tables indicate selective sync or excluded tables
+
+---
+
+### query
+
+Execute arbitrary SQL queries on DuckDB for analytical workloads.
+
+```bash
+docker exec duckling-server node packages/server/dist/cli.js query "<sql>"
+```
+
+<ParamField path="sql" type="string" required>
+  SQL query to execute on DuckDB.
+</ParamField>
+
+<ParamField path="--database" type="string" optional>
+  Database ID to query. Defaults to the first configured database.
+</ParamField>
+
+**Examples:**
+
+<CodeGroup>
+```bash Simple Count
+docker exec duckling-server node packages/server/dist/cli.js query "SELECT COUNT(*) FROM User"
+```
+
+```bash Date Filter
+docker exec duckling-server node packages/server/dist/cli.js query "SELECT COUNT(*) FROM orders WHERE order_date >= '2024-01-01'"
+```
+
+```bash Aggregation
+docker exec duckling-server node packages/server/dist/cli.js query "SELECT order_date, COUNT(*) as total FROM orders GROUP BY order_date ORDER BY order_date DESC LIMIT 10"
+```
+
+```bash Join Query
+docker exec duckling-server node packages/server/dist/cli.js query "SELECT u.name, COUNT(o.id) as order_count FROM User u LEFT JOIN Order o ON u.id = o.userId GROUP BY u.id, u.name ORDER BY order_count DESC LIMIT 10"
+```
+</CodeGroup>
+
+**Example Output:**
+
+```json
+[
+  {
+    "order_date": "2025-03-01",
+    "total": 234
+  },
+  {
+    "order_date": "2025-02-28",
+    "total": 189
+  }
+]
+```
+
+**Use Cases:**
+- Ad-hoc analytical queries
+- Data exploration
+- Validation queries
+- Export data for reporting
+
+**Performance Benefits:**
+- 5-10x faster than MySQL for analytical queries
+- Columnar storage for efficient aggregations
+- No network overhead (in-process queries)
+
+---
+
+## Dump Management Commands
+
+### dump-create
+
+Create a full database dump including all tables and metadata.
+
+```bash
+docker exec duckling-server node packages/server/dist/cli.js dump-create
+```
+
+**Example Output:**
+
+```json
+{
+  "success": true,
+  "dumpFile": "/app/dumps/duckling_2025-03-01_120000.dump",
+  "totalTables": 45,
+  "totalRecords": 1234567,
+  "duration": 15000
+}
+```
+
+**Dump Location:**
+- Container path: `/app/dumps/`
+- Host path: `./dumps/` (via volume mount)
+
+**Use Cases:**
+- Regular backups
+- Pre-migration snapshots
+- Disaster recovery preparation
+
+---
+
+### dump-restore
+
+Restore DuckDB database from a dump file.
+
+```bash
+docker exec duckling-server node packages/server/dist/cli.js dump-restore <filename>
+```
+
+<ParamField path="filename" type="string" required>
+  Name of the dump file to restore (from `/app/dumps/` directory).
+</ParamField>
+
+**Example:**
+
+```bash
+docker exec duckling-server node packages/server/dist/cli.js dump-restore duckling_2025-03-01_120000.dump
+```
+
+**Example Output:**
+
+```json
+{
+  "success": true,
+  "totalTables": 45,
+  "totalRecords": 1234567,
+  "duration": 12000
+}
+```
+
+**Notes:**
+- Overwrites existing DuckDB data
+- Validates dump file before restore
+- Atomic restore ensures data integrity
+
+---
+
+### dump-list
+
+List all available dump files with metadata.
+
+```bash
+docker exec duckling-server node packages/server/dist/cli.js dump-list
+```
+
+**Example Output:**
+
+```json
+[
+  {
+    "filename": "duckling_2025-03-01_120000.dump",
+    "size": 524288000,
+    "created": "2025-03-01T12:00:00.000Z"
+  },
+  {
+    "filename": "duckling_2025-02-28_120000.dump",
+    "size": 520192000,
+    "created": "2025-02-28T12:00:00.000Z"
+  }
+]
+```
+
+**Use Cases:**
+- Verify backup availability
+- Select dump for restore
+- Monitor backup storage
+
+---
+
+### dump-cleanup
+
+Clean up old dump files to free disk space.
+
+```bash
+docker exec duckling-server node packages/server/dist/cli.js dump-cleanup [days]
+```
+
+<ParamField path="days" type="number" default="7">
+  Delete dump files older than this many days.
+</ParamField>
+
+**Examples:**
+
+```bash
+# Clean up dumps older than 7 days (default)
+docker exec duckling-server node packages/server/dist/cli.js dump-cleanup
+
+# Clean up dumps older than 30 days
+docker exec duckling-server node packages/server/dist/cli.js dump-cleanup 30
+
+# Clean up dumps older than 1 day
+docker exec duckling-server node packages/server/dist/cli.js dump-cleanup 1
+```
+
+**Example Output:**
+
+```bash
+Cleanup completed: deleted 5 old dump files
+```
+
+**Use Cases:**
+- Automated backup rotation
+- Disk space management
+- Compliance with retention policies
+
+---
+
+## Scripting & Automation
+
+### Bash Script Example
+
+```bash
+#!/bin/bash
+
+# Backup and validate script
+set -e
+
+DATABASE="lms"
+CONTAINER="duckling-server"
+
+echo "Running health check..."
+docker exec $CONTAINER node packages/server/dist/cli.js health --database $DATABASE
+
+echo "Creating backup..."
+docker exec $CONTAINER node packages/server/dist/cli.js dump-create
+
+echo "Running incremental sync..."
+docker exec $CONTAINER node packages/server/dist/cli.js sync-incremental --database $DATABASE
+
+echo "Validating sync..."
+VALIDATION=$(docker exec $CONTAINER node packages/server/dist/cli.js validate --database $DATABASE)
+echo $VALIDATION | jq '.'
+
+if echo $VALIDATION | jq -e '.valid == true' > /dev/null; then
+  echo "✓ Validation passed"
+else
+  echo "✗ Validation failed"
+  exit 1
+fi
+
+echo "Cleaning up old backups..."
+docker exec $CONTAINER node packages/server/dist/cli.js dump-cleanup 7
+
+echo "Done!"
+```
+
+### Cron Job Example
+
+```bash
+# Run incremental sync every 15 minutes
+*/15 * * * * docker exec duckling-server node packages/server/dist/cli.js sync-incremental --database lms >> /var/log/duckling-sync.log 2>&1
+
+# Daily full backup at 2 AM
+0 2 * * * docker exec duckling-server node packages/server/dist/cli.js dump-create >> /var/log/duckling-backup.log 2>&1
+
+# Weekly cleanup on Sunday at 3 AM
+0 3 * * 0 docker exec duckling-server node packages/server/dist/cli.js dump-cleanup 7 >> /var/log/duckling-cleanup.log 2>&1
+```
+
+### Python Script Example
+
+```python
+import subprocess
+import json
+import sys
+
+def run_cli(command, database="lms"):
+    """Execute Duckling CLI command and return JSON output."""
+    cmd = [
+        "docker", "exec", "duckling-server",
+        "node", "packages/server/dist/cli.js",
+        command, "--database", database
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    if result.returncode != 0:
+        print(f"Error: {result.stderr}", file=sys.stderr)
+        sys.exit(1)
+    
+    return json.loads(result.stdout)
+
+# Health check
+health = run_cli("health")
+if health.get("mysql") != "healthy" or health.get("duckdb") != "healthy":
+    print("Database unhealthy!")
+    sys.exit(1)
+
+# Sync and validate
+run_cli("sync-incremental")
+validation = run_cli("validate")
+
+if not validation.get("valid"):
+    invalid = [t for t in validation.get("tables", []) if not t.get("valid")]
+    print(f"Validation failed for {len(invalid)} tables:")
+    for table in invalid:
+        print(f"  - {table['name']}: {table.get('difference', 0)} records difference")
+    sys.exit(1)
+
+print("Sync completed successfully!")
+```
+
+## Advanced Usage
+
+### Multi-Database Operations
+
+Run the same command across multiple databases:
+
+```bash
+#!/bin/bash
+
+DATABASES=("lms" "analytics" "production")
+
+for db in "${DATABASES[@]}"; do
+  echo "Syncing database: $db"
+  docker exec duckling-server node packages/server/dist/cli.js sync-incremental --database $db
+  
+  echo "Validating database: $db"
+  docker exec duckling-server node packages/server/dist/cli.js validate --database $db | jq '.valid'
+done
+```
+
+### Query Result Processing
+
+Use `jq` to process query results:
+
+```bash
+# Get total user count
+docker exec duckling-server node packages/server/dist/cli.js query "SELECT COUNT(*) as count FROM User" | jq '.[0].count'
+
+# Export to CSV
+docker exec duckling-server node packages/server/dist/cli.js query "SELECT * FROM User LIMIT 100" | jq -r '(.[0] | keys_unsorted) as $keys | $keys, map([.[ $keys[] ]])[] | @csv' > users.csv
+
+# Filter and format
+docker exec duckling-server node packages/server/dist/cli.js query "SELECT name, email FROM User" | jq '.[] | "\(.name) <\(.email)>"'
+```
+
+### Error Handling
+
+```bash
+#!/bin/bash
+
+set +e  # Don't exit on error
+
+# Attempt sync with retry logic
+MAX_RETRIES=3
+RETRY_COUNT=0
+
+while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+  echo "Sync attempt $((RETRY_COUNT + 1))/$MAX_RETRIES"
+  
+  docker exec duckling-server node packages/server/dist/cli.js sync-incremental
+  
+  if [ $? -eq 0 ]; then
+    echo "Sync succeeded"
+    break
+  else
+    echo "Sync failed, retrying in 30 seconds..."
+    RETRY_COUNT=$((RETRY_COUNT + 1))
+    sleep 30
+  fi
+done
+
+if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
+  echo "Sync failed after $MAX_RETRIES attempts"
+  exit 1
+fi
+```
+
+## Troubleshooting
+
+### Connection Errors
+
+If you encounter connection errors:
+
+```bash
+# Check container is running
+docker ps | grep duckling-server
+
+# Check logs
+docker logs duckling-server
+
+# Verify environment variables
+docker exec duckling-server env | grep MYSQL
+
+# Test connectivity
+docker exec duckling-server node packages/server/dist/cli.js health
+```
+
+### Performance Issues
+
+For slow sync operations:
+
+```bash
+# Check table sizes in MySQL
+docker exec duckling-server node scripts/mysql.js "SELECT table_name, table_rows FROM information_schema.tables WHERE table_schema = DATABASE()"
+
+# Monitor sync progress (check logs in real-time)
+docker logs -f duckling-server
+
+# Verify batch size configuration
+docker exec duckling-server env | grep BATCH_SIZE
+```
+
+### Validation Failures
+
+If validation shows mismatched counts:
+
+```bash
+# Get detailed validation
+docker exec duckling-server node packages/server/dist/cli.js validate | jq '.tables[] | select(.valid == false)'
+
+# Re-sync specific table via API
+curl -X POST http://localhost:3001/api/sync/table/User \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+
+# Compare specific table
+docker exec duckling-server node packages/server/dist/cli.js query "SELECT COUNT(*) FROM User"
+docker exec duckling-server node scripts/mysql.js "SELECT COUNT(*) FROM User"
+```
+
+## See Also
+
+<CardGroup cols={2}>
+  <Card title="CLI Overview" icon="book" href="/cli/overview">
+    Introduction and common workflows
+  </Card>
+  <Card title="API Reference" icon="code" href="/api-reference/overview">
+    RESTful API endpoints
+  </Card>
+  <Card title="Configuration" icon="gear" href="/configuration">
+    Environment variables and settings
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture">
+    System architecture and design
+  </Card>
+</CardGroup>

@@ -1,0 +1,400 @@
+---
+title: 'Schema Evolution'
+description: 'Managing schema changes and evolution in Duckling'
+---
+
+## Overview
+
+Duckling supports additive schema evolution with zero downtime. The Sequential Appender architecture automatically detects schema changes and handles them gracefully without requiring full re-syncs.
+
+## Supported Schema Changes
+
+### Adding Columns
+
+Adding new columns to MySQL tables is fully supported:
+
+<Note>
+**Automatic Detection**: When you add a column to a MySQL table, Duckling automatically detects the new column during the next sync and adds it to the DuckDB schema.
+</Note>
+
+```sql
+-- MySQL: Add a new column
+ALTER TABLE users ADD COLUMN phone VARCHAR(20);
+
+-- Duckling: Automatically adds the column on next sync
+-- No manual intervention required
+```
+
+**Behavior**:
+- Existing rows in DuckDB will have NULL values for the new column
+- New syncs will populate the column with data from MySQL
+- Incremental sync continues to work normally
+
+### Adding Tables
+
+New tables are automatically discovered and replicated:
+
+```sql
+-- MySQL: Create a new table
+CREATE TABLE new_feature (
+  id INT PRIMARY KEY,
+  name VARCHAR(255),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Duckling: Automatically creates and syncs the table
+```
+
+<Accordion title="How Table Discovery Works">
+1. On each sync cycle, Duckling queries MySQL for the list of tables
+2. Compares with existing tables in DuckDB
+3. Creates missing tables automatically
+4. Starts syncing data immediately
+5. Respects `EXCLUDED_TABLES` configuration
+</Accordion>
+
+### Changing Column Types
+
+<Warning>
+**Type Changes Not Supported**: Changing the data type of an existing column is not automatically handled. This requires manual intervention:
+
+1. Stop the sync service
+2. Drop the affected table in DuckDB
+3. Trigger a full sync to recreate the table
+4. Resume incremental sync
+</Warning>
+
+**Example workaround**:
+
+```bash
+# 1. Stop sync (via dashboard or API)
+curl -X POST http://localhost:3001/api/automation/stop \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+
+# 2. Drop the table in DuckDB
+curl -X POST http://localhost:3001/api/query \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "DROP TABLE users"}'
+
+# 3. Trigger full sync for that table
+curl -X POST http://localhost:3001/api/sync/table/users \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+
+# 4. Resume automation
+curl -X POST http://localhost:3001/api/automation/start \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+```
+
+### Dropping Columns
+
+<Warning>
+**Column Drops Require Manual Cleanup**: When you drop a column in MySQL, Duckling will not automatically drop it from DuckDB. The column remains in DuckDB with stale data.
+</Warning>
+
+**Manual cleanup**:
+
+```sql
+-- MySQL: Drop column
+ALTER TABLE users DROP COLUMN old_field;
+
+-- DuckDB: Manually drop column (optional)
+ALTER TABLE users DROP COLUMN old_field;
+```
+
+Alternatively, you can trigger a full re-sync to recreate the table with the new schema.
+
+### Dropping Tables
+
+Dropped tables remain in DuckDB:
+
+```sql
+-- MySQL: Drop table
+DROP TABLE legacy_table;
+
+-- DuckDB: Table remains with stale data
+-- Manual cleanup required
+```
+
+**Cleanup options**:
+
+1. **Manual drop** (recommended):
+   ```sql
+   DROP TABLE legacy_table;
+   ```
+
+2. **Exclude from future syncs**:
+   ```bash
+   # Add to .env
+   EXCLUDED_TABLES=legacy_table,other_table
+   ```
+
+## Primary Key Changes
+
+### Adding Primary Keys
+
+<Warning>
+**Primary Key Changes Not Supported**: Adding or changing primary keys requires a full re-sync of the affected table.
+</Warning>
+
+Duckling relies on primary keys for:
+- `INSERT OR REPLACE` upsert logic
+- Deduplication in views
+- Data integrity
+
+**Recommended approach**:
+
+```bash
+# 1. Stop sync
+curl -X POST http://localhost:3001/api/automation/stop
+
+# 2. Drop and recreate table in DuckDB
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "DROP TABLE table_name"}'
+
+# 3. Full sync to recreate with new primary key
+curl -X POST http://localhost:3001/api/sync/table/table_name
+
+# 4. Resume sync
+curl -X POST http://localhost:3001/api/automation/start
+```
+
+## Watermark Column Changes
+
+Changing the watermark column (e.g., renaming `updated_at` to `modified_at`) requires resetting the watermark:
+
+<Accordion title="Watermark Detection Priority">
+Duckling automatically detects watermark columns in this order:
+
+1. `updatedAt` / `updated_at` / `modifiedAt` / `modified_at`
+2. `createdAt` / `created_at`  
+3. `timestamp`
+
+See [Type Support](/guides/type-support) for more details.
+</Accordion>
+
+**Handling watermark column changes**:
+
+```sql
+-- MySQL: Rename watermark column
+ALTER TABLE users CHANGE updated_at modified_at TIMESTAMP;
+```
+
+```bash
+# Reset watermark for the table
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "DELETE FROM sync_log WHERE table_name = 'users'"}'
+
+# Trigger full sync to re-establish watermark
+curl -X POST http://localhost:3001/api/sync/table/users
+```
+
+## Index Changes
+
+<Note>
+**Indexes Not Replicated**: MySQL indexes are not replicated to DuckDB. DuckDB uses columnar storage and automatic indexing, so explicit indexes are rarely needed.
+</Note>
+
+If you need indexes in DuckDB for specific query patterns:
+
+```sql
+-- Manually create index in DuckDB
+CREATE INDEX idx_users_email ON users(email);
+```
+
+## Constraint Changes
+
+### Foreign Keys
+
+<Note>
+**Foreign Keys Not Enforced**: Foreign key constraints from MySQL are not replicated to DuckDB. This is by design to avoid cascading failures during replication.
+</Note>
+
+DuckDB tables are independent. If you need referential integrity checking:
+
+```sql
+-- Manually verify referential integrity
+SELECT COUNT(*) 
+FROM orders o 
+LEFT JOIN users u ON o.user_id = u.id 
+WHERE u.id IS NULL;
+```
+
+### Unique Constraints
+
+Unique constraints (except primary keys) are not enforced:
+
+```sql
+-- MySQL: Unique constraint
+ALTER TABLE users ADD UNIQUE KEY unique_email (email);
+
+-- DuckDB: Not enforced
+-- Check manually if needed
+SELECT email, COUNT(*) 
+FROM users 
+GROUP BY email 
+HAVING COUNT(*) > 1;
+```
+
+### Check Constraints
+
+<Note>
+Check constraints from MySQL are not replicated to DuckDB. Data validation happens at the MySQL layer.
+</Note>
+
+## Schema Verification
+
+Verify schema consistency between MySQL and DuckDB:
+
+### Check Table List
+
+```bash
+# List MySQL tables
+docker exec duckling-server node scripts/mysql.js "SHOW TABLES"
+
+# List DuckDB tables
+curl http://localhost:3001/api/tables
+```
+
+### Compare Column Definitions
+
+```bash
+# MySQL schema
+docker exec duckling-server node scripts/mysql.js "DESCRIBE users"
+
+# DuckDB schema
+curl http://localhost:3001/api/tables/users/schema
+```
+
+### Compare Row Counts
+
+```bash
+# Compare counts across all tables
+curl http://localhost:3001/api/sync/validate
+```
+
+This endpoint returns:
+- MySQL count
+- DuckDB count
+- Difference
+- Sync status
+
+## Best Practices
+
+### 1. Test Schema Changes in Development
+
+<Note>
+Always test schema changes in a development environment before applying them to production:
+
+1. Apply MySQL schema change
+2. Trigger sync
+3. Verify DuckDB schema
+4. Test queries
+5. Apply to production
+</Note>
+
+### 2. Use Additive Changes
+
+Prefer additive changes over destructive ones:
+
+✅ **Good**: Add new columns  
+✅ **Good**: Add new tables  
+❌ **Avoid**: Change column types  
+❌ **Avoid**: Drop columns  
+❌ **Avoid**: Change primary keys
+
+### 3. Monitor Sync Logs
+
+Watch sync logs for schema evolution events:
+
+```bash
+# View recent sync logs
+curl "http://localhost:3001/api/sync-logs?limit=20"
+
+# Filter by specific table
+curl "http://localhost:3001/api/sync-logs?table=users&limit=10"
+```
+
+### 4. Plan for Breaking Changes
+
+For breaking schema changes:
+
+1. Schedule maintenance window
+2. Stop sync service
+3. Apply MySQL changes
+4. Drop affected DuckDB tables
+5. Trigger full sync
+6. Verify data integrity
+7. Resume sync service
+
+### 5. Document Schema Changes
+
+Maintain a changelog of schema changes:
+
+```markdown
+# Schema Changelog
+
+## 2025-03-01
+- Added `phone` column to `users` table
+- Created `user_preferences` table
+- Dropped `legacy_sessions` table
+
+## 2025-02-15
+- Changed `users.status` from VARCHAR to ENUM
+- Required full re-sync of users table
+```
+
+## Rollback Strategy
+
+### Rolling Back Column Additions
+
+Column additions can be rolled back:
+
+```sql
+-- MySQL: Remove column
+ALTER TABLE users DROP COLUMN phone;
+
+-- DuckDB: Optional cleanup
+ALTER TABLE users DROP COLUMN phone;
+```
+
+### Rolling Back Table Additions
+
+```sql
+-- MySQL: Drop table
+DROP TABLE new_feature;
+
+-- DuckDB: Drop table and clean sync logs
+DROP TABLE new_feature;
+DELETE FROM sync_log WHERE table_name = 'new_feature';
+```
+
+### Rolling Back Type Changes
+
+<Warning>
+Type changes cannot be rolled back easily. You must:
+
+1. Restore MySQL schema from backup
+2. Drop DuckDB table
+3. Trigger full re-sync
+</Warning>
+
+## Multi-Database Schema Management
+
+When using multi-database support:
+
+```bash
+# Schema changes for specific database
+curl -X POST 'http://localhost:3001/api/sync/table/users?db=lms'
+
+# Verify schema for specific database
+curl 'http://localhost:3001/api/tables/users/schema?db=lms'
+```
+
+Each database maintains independent schema state.
+
+## Related Topics
+
+- [Type Support](/guides/type-support) - MySQL to DuckDB type mappings
+- [Common Issues](/guides/common-issues) - Troubleshooting schema problems
+- [Debugging](/guides/debugging) - Debug schema sync issues

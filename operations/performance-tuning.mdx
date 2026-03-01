@@ -1,0 +1,606 @@
+---
+title: 'Performance Tuning Guide'
+description: 'Optimize Duckling for maximum throughput and query performance'
+---
+
+## Overview
+
+Duckling is designed for high performance out-of-the-box, but you can optimize for your specific workload using configuration tuning. This guide covers all performance-related settings.
+
+## Key Performance Factors
+
+<CardGroup cols={2}>
+  <Card title="Sync Performance" icon="arrows-rotate">
+    Optimize data replication throughput from MySQL to DuckDB
+  </Card>
+  <Card title="Query Performance" icon="gauge-high">
+    Maximize analytical query speed on DuckDB
+  </Card>
+  <Card title="Resource Utilization" icon="memory">
+    Balance CPU, memory, and I/O usage
+  </Card>
+  <Card title="Concurrency" icon="layer-group">
+    Handle multiple simultaneous operations
+  </Card>
+</CardGroup>
+
+## Sync Performance Tuning
+
+### Batch Size Configuration
+
+**BATCH_SIZE** controls how many records are fetched from MySQL per batch:
+
+```bash
+BATCH_SIZE=1000  # Default
+```
+
+**Impact:**
+- **Higher values** (2000-5000): Faster sync, higher memory usage
+- **Lower values** (500-1000): Slower sync, lower memory usage
+
+**Recommendations:**
+- **Small tables** (&lt;100K rows): `BATCH_SIZE=500`
+- **Medium tables** (100K-10M rows): `BATCH_SIZE=1000` (default)
+- **Large tables** (>10M rows): `BATCH_SIZE=2000-5000`
+- **Memory constrained**: `BATCH_SIZE=500`
+
+<Warning>
+Batch sizes above 5000 may hit MySQL max_allowed_packet limits or cause network timeouts.
+</Warning>
+
+### Insert Batch Size
+
+**INSERT_BATCH_SIZE** controls how many records are inserted into DuckDB per batch:
+
+```bash
+INSERT_BATCH_SIZE=2000  # Default
+```
+
+**Impact:**
+- **Higher values** (3000-5000): Faster inserts, higher memory usage
+- **Lower values** (1000-2000): Slower inserts, lower memory usage
+
+**Recommendations:**
+- **Default**: `INSERT_BATCH_SIZE=2000`
+- **High throughput**: `INSERT_BATCH_SIZE=5000`
+- **Memory constrained**: `INSERT_BATCH_SIZE=1000`
+
+<Info>
+Duckling uses the DuckDB Appender API which achieves 60,000+ rows/sec, 6x faster than traditional INSERT statements.
+</Info>
+
+### Appender Flush Interval
+
+**APPENDER_FLUSH_INTERVAL** controls how often the Appender flushes to disk (milliseconds):
+
+```bash
+APPENDER_FLUSH_INTERVAL=5000  # Default (5 seconds)
+```
+
+**Impact:**
+- **Higher values** (10000-30000): Better throughput, higher memory usage
+- **Lower values** (1000-5000): More frequent disk writes, lower memory usage
+
+**Recommendations:**
+- **Default**: `APPENDER_FLUSH_INTERVAL=5000`
+- **High throughput**: `APPENDER_FLUSH_INTERVAL=10000`
+- **Low latency**: `APPENDER_FLUSH_INTERVAL=1000`
+
+### Sync Interval
+
+**SYNC_INTERVAL_MINUTES** controls how often automatic sync runs:
+
+```bash
+SYNC_INTERVAL_MINUTES=15  # Default
+```
+
+**Impact:**
+- **Lower values** (5-10): Near real-time sync, higher load
+- **Higher values** (30-60): Lower load, less fresh data
+
+**Recommendations:**
+- **Real-time analytics**: `SYNC_INTERVAL_MINUTES=5`
+- **Standard analytics**: `SYNC_INTERVAL_MINUTES=15` (default)
+- **Batch analytics**: `SYNC_INTERVAL_MINUTES=60`
+
+<Note>
+For near real-time sync (&lt;5 minutes), consider enabling CDC (Change Data Capture) instead of polling-based sync.
+</Note>
+
+## Connection Pool Tuning
+
+### MySQL Connections
+
+**MYSQL_MAX_CONNECTIONS** sets the MySQL connection pool size:
+
+```bash
+MYSQL_MAX_CONNECTIONS=5  # Default
+```
+
+**Impact:**
+- **Higher values** (10-20): More parallel table fetches, higher MySQL load
+- **Lower values** (3-5): Less MySQL load, slower sync
+
+**Recommendations:**
+- **Small databases** (&lt;20 tables): `MYSQL_MAX_CONNECTIONS=3`
+- **Medium databases** (20-100 tables): `MYSQL_MAX_CONNECTIONS=5` (default)
+- **Large databases** (>100 tables): `MYSQL_MAX_CONNECTIONS=10`
+- **Shared MySQL**: Keep low (3-5) to avoid overwhelming source
+
+<Warning>
+Increasing MySQL connections puts more load on the source database. Monitor MySQL performance when tuning.
+</Warning>
+
+### DuckDB Connections
+
+**DUCKDB_MAX_CONNECTIONS** sets the DuckDB connection pool size:
+
+```bash
+DUCKDB_MAX_CONNECTIONS=10  # Default
+```
+
+**Impact:**
+- **Higher values** (20-50): More concurrent queries, higher memory usage
+- **Lower values** (5-10): Less memory usage, query queuing
+
+**Recommendations:**
+- **Low query volume**: `DUCKDB_MAX_CONNECTIONS=10` (default)
+- **High query volume**: `DUCKDB_MAX_CONNECTIONS=20-30`
+- **Memory constrained**: `DUCKDB_MAX_CONNECTIONS=5`
+
+## Worker Thread Configuration
+
+**WORKER_THREADS** controls parallel processing threads:
+
+```bash
+WORKER_THREADS=0  # Default (auto: CPU cores - 1, min 1)
+```
+
+**Options:**
+- `0`: Auto-detect (recommended)
+- `1-N`: Explicit thread count
+
+**Impact:**
+- **More threads**: Better parallelism for large table syncs
+- **Fewer threads**: Lower CPU usage
+
+**Recommendations:**
+- **Default**: `WORKER_THREADS=0` (auto)
+- **CPU constrained**: `WORKER_THREADS=2`
+- **High throughput**: `WORKER_THREADS=8` (match CPU cores)
+
+<Info>
+DuckDB automatically parallelizes queries internally. This setting controls Duckling's sync operation parallelism.
+</Info>
+
+## Query Performance Tuning
+
+### Query Governor
+
+**MAX_CONCURRENT_QUERIES** limits simultaneous query execution:
+
+```bash
+MAX_CONCURRENT_QUERIES=10  # Default
+```
+
+**Impact:**
+- **Higher values**: More concurrent queries, higher resource usage
+- **Lower values**: Better per-query performance, query queuing
+
+**Recommendations:**
+- **Default**: `MAX_CONCURRENT_QUERIES=10`
+- **High concurrency**: `MAX_CONCURRENT_QUERIES=20`
+- **Resource constrained**: `MAX_CONCURRENT_QUERIES=5`
+
+### Query Timeout
+
+**QUERY_TIMEOUT_MS** sets maximum query execution time:
+
+```bash
+QUERY_TIMEOUT_MS=30000  # Default (30 seconds)
+```
+
+**Impact:**
+- **Higher values**: Allow long-running queries
+- **Lower values**: Prevent runaway queries
+
+**Recommendations:**
+- **Interactive queries**: `QUERY_TIMEOUT_MS=30000` (default)
+- **Analytical queries**: `QUERY_TIMEOUT_MS=300000` (5 minutes)
+- **Report generation**: `QUERY_TIMEOUT_MS=600000` (10 minutes)
+
+### Query Queue
+
+**QUERY_QUEUE_MAX** sets maximum queued queries:
+
+```bash
+QUERY_QUEUE_MAX=50  # Default
+```
+
+**Impact:**
+- **Higher values**: More buffering, higher memory usage
+- **Lower values**: Faster query rejection under load
+
+**Recommendations:**
+- **Default**: `QUERY_QUEUE_MAX=50`
+- **High load**: `QUERY_QUEUE_MAX=100`
+- **Fail fast**: `QUERY_QUEUE_MAX=20`
+
+## Memory Management
+
+### System Requirements
+
+**Minimum:**
+- CPU: 2 cores
+- RAM: 2 GB
+- Disk: 2x database size
+
+**Recommended:**
+- CPU: 4+ cores
+- RAM: 8+ GB
+- Disk: 3x database size (for backups)
+
+**High Performance:**
+- CPU: 8+ cores
+- RAM: 16+ GB
+- Disk: SSD, 3x database size
+
+### Memory Usage Patterns
+
+| Operation | Memory Usage | Peak Memory |
+|-----------|--------------|-------------|
+| Sync (1000 batch) | ~50 MB per table | ~200 MB |
+| Sync (5000 batch) | ~250 MB per table | ~1 GB |
+| Query (simple) | ~10 MB | ~50 MB |
+| Query (complex) | ~100 MB | ~500 MB |
+| Backup | ~100 MB | ~500 MB |
+| S3 Upload | Streaming | ~100 MB |
+
+<Note>
+DuckDB uses memory-mapped I/O for database files. Ensure sufficient free RAM for the OS to cache frequently accessed data.
+</Note>
+
+### Monitoring Memory
+
+Check system metrics:
+
+```bash
+curl http://localhost:3001/metrics?db=your-database-id \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+```
+
+Watch for:
+- `rssMB` > 80% of available RAM
+- `heapUsedMB` growing continuously (memory leak)
+- `eventLoopLagMs` > 100ms (overload)
+
+## I/O Optimization
+
+### Storage Type
+
+**Recommendations:**
+- **SSD**: 10x faster queries, highly recommended
+- **NVMe**: Best performance for large databases
+- **HDD**: Only for small databases or budget constraints
+
+### File System
+
+**Best:**
+- ext4 (Linux)
+- XFS (Linux, large files)
+- APFS (macOS)
+
+**Avoid:**
+- NFS (network latency)
+- SMB/CIFS (network latency)
+- FAT32 (file size limits)
+
+### Docker Volume Performance
+
+**Bind Mount (Recommended):**
+```yaml
+volumes:
+  - ./data:/app/data  # Direct host filesystem access
+```
+
+**Named Volume:**
+```yaml
+volumes:
+  - duckdb-data:/app/data  # Docker managed, slightly slower
+```
+
+<Warning>
+Avoid Docker volume drivers that use network storage (NFS, EBS, etc.) for the DuckDB database file. Use local SSD storage for best performance.
+</Warning>
+
+## Network Optimization
+
+### MySQL Network
+
+**Latency Impact:**
+- **&lt;1ms** (same server): Excellent
+- **1-10ms** (same datacenter): Good
+- **10-50ms** (same region): Acceptable
+- **>50ms** (cross-region): Increase batch sizes
+
+**Optimizations:**
+- Use private network when possible
+- Increase `BATCH_SIZE` for high latency
+- Enable MySQL query cache on source
+
+### API Performance
+
+**Query API:**
+- Use `LIMIT` clauses for large result sets
+- Enable compression for large responses
+- Use pagination for table data
+
+**Connection:**
+- Keep-alive connections
+- HTTP/2 for better multiplexing
+- CDN for frontend assets
+
+## Performance Monitoring
+
+### Key Metrics
+
+**Sync Performance:**
+```bash
+curl "http://localhost:3001/api/sync-logs?limit=100&db=your-database-id" \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}" | \
+  jq '.[] | {table: .table_name, records: .records_processed, duration: .duration_ms, rate: (.records_processed / (.duration_ms / 1000))}'
+```
+
+Target rates:
+- Appender API: 60,000+ rows/sec
+- Small batches: 10,000+ rows/sec
+
+**Query Performance:**
+```bash
+curl http://localhost:3001/metrics?db=your-database-id \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}" | \
+  jq '.queries.patterns | sort_by(.avgMs) | reverse | .[0:10]'
+```
+
+Target times:
+- Simple aggregations: &lt;100ms
+- Complex joins: &lt;1s
+- Report queries: &lt;10s
+
+**System Health:**
+```bash
+curl http://localhost:3001/metrics?db=your-database-id \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}" | \
+  jq '.system.current'
+```
+
+Watch for:
+- `cpuPercent` < 80%
+- `rssMB` < 80% of available
+- `eventLoopLagMs` < 50ms
+
+## Configuration Profiles
+
+### High Throughput Profile
+
+**Goal:** Maximum sync speed, high resource usage
+
+```bash
+# Sync
+BATCH_SIZE=5000
+INSERT_BATCH_SIZE=5000
+APPENDER_FLUSH_INTERVAL=10000
+SYNC_INTERVAL_MINUTES=5
+
+# Connections
+MYSQL_MAX_CONNECTIONS=10
+DUCKDB_MAX_CONNECTIONS=30
+
+# Workers
+WORKER_THREADS=0  # Auto
+
+# Query
+MAX_CONCURRENT_QUERIES=20
+QUERY_TIMEOUT_MS=300000
+```
+
+### Balanced Profile (Default)
+
+**Goal:** Good performance, moderate resource usage
+
+```bash
+# Sync
+BATCH_SIZE=1000
+INSERT_BATCH_SIZE=2000
+APPENDER_FLUSH_INTERVAL=5000
+SYNC_INTERVAL_MINUTES=15
+
+# Connections
+MYSQL_MAX_CONNECTIONS=5
+DUCKDB_MAX_CONNECTIONS=10
+
+# Workers
+WORKER_THREADS=0  # Auto
+
+# Query
+MAX_CONCURRENT_QUERIES=10
+QUERY_TIMEOUT_MS=30000
+```
+
+### Low Resource Profile
+
+**Goal:** Minimal resource usage, slower performance
+
+```bash
+# Sync
+BATCH_SIZE=500
+INSERT_BATCH_SIZE=1000
+APPENDER_FLUSH_INTERVAL=5000
+SYNC_INTERVAL_MINUTES=30
+
+# Connections
+MYSQL_MAX_CONNECTIONS=3
+DUCKDB_MAX_CONNECTIONS=5
+
+# Workers
+WORKER_THREADS=2
+
+# Query
+MAX_CONCURRENT_QUERIES=5
+QUERY_TIMEOUT_MS=30000
+```
+
+## Benchmarking
+
+### Sync Benchmark
+
+Test sync performance:
+
+<Steps>
+  <Step title="Clear Database">
+    ```bash
+    rm data/your-database.db
+    ```
+  </Step>
+  
+  <Step title="Run Full Sync">
+    ```bash
+    time curl -X POST "http://localhost:3001/api/sync/full?db=your-database-id" \
+      -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+    ```
+  </Step>
+  
+  <Step title="Check Sync Logs">
+    ```bash
+    curl "http://localhost:3001/api/sync-logs?limit=100&db=your-database-id" \
+      -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+    ```
+  </Step>
+</Steps>
+
+Calculate rows/second:
+```bash
+total_records / total_seconds = rows_per_second
+```
+
+### Query Benchmark
+
+Test query performance:
+
+```bash
+# Simple aggregation
+time curl -X POST http://localhost:3001/api/query?db=your-database-id \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT COUNT(*) FROM User"}'
+
+# Complex join
+time curl -X POST http://localhost:3001/api/query?db=your-database-id \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT u.*, COUNT(o.id) FROM User u LEFT JOIN Order o ON u.id = o.userId GROUP BY u.id"}'
+```
+
+## Troubleshooting Performance
+
+### Slow Sync
+
+<Steps>
+  <Step title="Check Sync Logs">
+    Identify slow tables:
+    ```bash
+    curl "http://localhost:3001/api/sync-logs?db=your-database-id" \
+      -H "Authorization: Bearer ${DUCKLING_API_KEY}" | \
+      jq '.[] | {table: .table_name, duration: .duration_ms}' | \
+      sort -k2 -n
+    ```
+  </Step>
+  
+  <Step title="Check MySQL Performance">
+    Test direct MySQL query speed:
+    ```bash
+    docker exec duckling-server node scripts/mysql.js "SELECT COUNT(*) FROM SlowTable"
+    ```
+  </Step>
+  
+  <Step title="Increase Batch Size">
+    For large tables:
+    ```bash
+    BATCH_SIZE=2000
+    INSERT_BATCH_SIZE=3000
+    ```
+  </Step>
+  
+  <Step title="Add MySQL Index">
+    Index timestamp columns used for watermarks:
+    ```sql
+    CREATE INDEX idx_updated_at ON SlowTable(updatedAt);
+    ```
+  </Step>
+</Steps>
+
+### Slow Queries
+
+<Steps>
+  <Step title="Check Query Patterns">
+    ```bash
+    curl http://localhost:3001/metrics?db=your-database-id \
+      -H "Authorization: Bearer ${DUCKLING_API_KEY}" | \
+      jq '.queries.patterns | sort_by(.avgMs) | reverse'
+    ```
+  </Step>
+  
+  <Step title="Optimize SQL">
+    - Add WHERE clauses to filter early
+    - Use LIMIT for large result sets
+    - Avoid SELECT \* when possible
+    - Use indexes on join columns
+  </Step>
+  
+  <Step title="Monitor Active Queries">
+    ```bash
+    curl http://localhost:3001/metrics?db=your-database-id \
+      -H "Authorization: Bearer ${DUCKLING_API_KEY}" | \
+      jq '.queries.active'
+    ```
+  </Step>
+</Steps>
+
+### High Memory Usage
+
+<Steps>
+  <Step title="Check System Metrics">
+    ```bash
+    curl http://localhost:3001/metrics?db=your-database-id \
+      -H "Authorization: Bearer ${DUCKLING_API_KEY}" | \
+      jq '.system.current'
+    ```
+  </Step>
+  
+  <Step title="Reduce Batch Sizes">
+    ```bash
+    BATCH_SIZE=500
+    INSERT_BATCH_SIZE=1000
+    ```
+  </Step>
+  
+  <Step title="Reduce Connections">
+    ```bash
+    DUCKDB_MAX_CONNECTIONS=5
+    MAX_CONCURRENT_QUERIES=5
+    ```
+  </Step>
+  
+  <Step title="Restart Server">
+    If memory leak suspected:
+    ```bash
+    docker-compose restart duckdb-server
+    ```
+  </Step>
+</Steps>
+
+## Next Steps
+
+- [Synchronization](/operations/synchronization) - Configure sync operations
+- [Monitoring](/operations/monitoring) - Set up performance monitoring
+- [Backups](/operations/backups) - Configure backup automation

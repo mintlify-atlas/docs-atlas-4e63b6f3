@@ -1,0 +1,428 @@
+---
+title: "MySQL Wire Protocol Server"
+description: "Query DuckDB replicas using standard MySQL clients on port 3307"
+---
+
+# MySQL Wire Protocol Server
+
+Duckling includes a MySQL-compatible wire protocol server that allows you to query DuckDB replicas using any MySQL client (mysql CLI, DBeaver, Sequelize, phpMyAdmin, etc.).
+
+## Overview
+
+The protocol server implements the MySQL wire protocol using `mysql2`'s built-in server support. Clients connect to a dedicated TCP port (default: 3307) and run **read-only queries** against replicated DuckDB data.
+
+**Architecture:**
+```text
+MySQL Client (port 3307) → MySQL Wire Protocol → SQL Router → DuckDB Query → MySQL Result Format
+```
+
+## Environment Variables
+
+<ParamField path="MYSQL_PROTOCOL_ENABLED" type="boolean" default="false">
+  Enable MySQL wire protocol server
+</ParamField>
+
+<ParamField path="MYSQL_PROTOCOL_PORT" type="number" default="3307">
+  TCP port for MySQL protocol server (avoid 3306 conflict with source MySQL)
+</ParamField>
+
+<ParamField path="MYSQL_PROTOCOL_USERNAME" type="string" default="duckling">
+  Username for MySQL authentication
+</ParamField>
+
+<ParamField path="MYSQL_PROTOCOL_PASSWORD" type="string" required>
+  Password for MySQL authentication (uses `mysql_native_password` AUTH 41)
+</ParamField>
+
+<ParamField path="MYSQL_PROTOCOL_MAX_CONNECTIONS" type="number" default="50">
+  Maximum concurrent client connections
+</ParamField>
+
+<ParamField path="MYSQL_PROTOCOL_DEFAULT_DATABASE" type="string" default="default">
+  Default database ID if client doesn't specify one
+</ParamField>
+
+## Configuration Example
+
+```bash .env
+MYSQL_PROTOCOL_ENABLED=true
+MYSQL_PROTOCOL_PORT=3307
+MYSQL_PROTOCOL_USERNAME=duckling
+MYSQL_PROTOCOL_PASSWORD=secure_password_here
+MYSQL_PROTOCOL_MAX_CONNECTIONS=100
+MYSQL_PROTOCOL_DEFAULT_DATABASE=production
+```
+
+## Connecting with MySQL Clients
+
+### MySQL CLI
+
+```bash
+mysql -h localhost -P 3307 -u duckling -p
+# Enter password when prompted
+
+mysql> USE production;
+mysql> SELECT COUNT(*) FROM users;
+mysql> SHOW TABLES;
+```
+
+### DBeaver
+
+1. Create new connection → MySQL
+2. Host: `localhost`, Port: `3307`
+3. Username: `duckling`, Password: `<your-password>`
+4. Database: `production` (or leave blank for default)
+5. Test Connection → Connect
+
+### Node.js (mysql2)
+
+```javascript
+const mysql = require('mysql2/promise');
+
+const connection = await mysql.createConnection({
+  host: 'localhost',
+  port: 3307,
+  user: 'duckling',
+  password: 'secure_password_here',
+  database: 'production'
+});
+
+const [rows] = await connection.query('SELECT * FROM users LIMIT 10');
+console.log(rows);
+
+await connection.end();
+```
+
+### Sequelize ORM
+
+```javascript
+const { Sequelize } = require('sequelize');
+
+const sequelize = new Sequelize('production', 'duckling', 'secure_password_here', {
+  host: 'localhost',
+  port: 3307,
+  dialect: 'mysql',
+  logging: console.log
+});
+
+await sequelize.authenticate();
+console.log('Connected to DuckDB via MySQL protocol');
+
+const users = await sequelize.query('SELECT * FROM users LIMIT 10');
+console.log(users);
+```
+
+## Supported MySQL Features
+
+### Handshake & Authentication
+
+- **Protocol Version**: 10 (MySQL 5.x/8.x compatible)
+- **Server Version**: `8.0.32-Duckling`
+- **Authentication**: `mysql_native_password` (SHA1-based challenge-response)
+- **Character Set**: `utf8mb4_general_ci` (45)
+
+### Capability Flags
+
+The server advertises these MySQL capabilities:
+
+```typescript
+CLIENT_LONG_PASSWORD
+CLIENT_FOUND_ROWS
+CLIENT_LONG_FLAG
+CLIENT_CONNECT_WITH_DB
+CLIENT_NO_SCHEMA
+CLIENT_PROTOCOL_41
+CLIENT_TRANSACTIONS
+CLIENT_SECURE_CONNECTION
+CLIENT_MULTI_RESULTS
+CLIENT_PLUGIN_AUTH
+```
+
+<Warning>
+  **Unsupported Flags**: `CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA` and `CLIENT_CONNECT_ATTRS` are disabled to prevent parser crashes with TablePlus and other clients.
+</Warning>
+
+### Supported Commands
+
+| Command | Support | Notes |
+|---------|---------|-------|
+| `COM_QUERY` | ✅ Full | Execute SQL queries |
+| `COM_INIT_DB` | ✅ Full | `USE <database>` command |
+| `COM_PING` | ✅ Full | Keepalive check |
+| `COM_QUIT` | ✅ Full | Close connection |
+| `COM_STMT_PREPARE` | ❌ Not supported | Returns error 1295 |
+| `COM_STMT_EXECUTE` | ❌ Not supported | Returns error 1295 |
+
+<Note>
+  **Prepared Statements**: Not currently supported. Use text queries instead. Most ORMs fallback to text queries automatically.
+</Note>
+
+## Query Routing
+
+The protocol server includes a **smart SQL router** that intercepts certain queries:
+
+### Intercepted Queries
+
+These queries are handled by the router (not forwarded to DuckDB):
+
+```sql
+-- Version check
+SELECT VERSION();
+-- Returns: "8.0.32-Duckling"
+
+-- Database list
+SHOW DATABASES;
+-- Returns: List of configured databases from databases.json
+
+-- Connection ID
+SELECT CONNECTION_ID();
+-- Returns: Current connection ID (integer)
+
+-- User check
+SELECT USER();
+-- Returns: "duckling@localhost"
+```
+
+### Forwarded to DuckDB
+
+All other queries are forwarded to DuckDB:
+
+```sql
+SELECT * FROM users;
+SHOW TABLES;
+DESCRIBE users;
+SELECT COUNT(*) FROM orders WHERE status = 'completed';
+```
+
+## Multi-Database Support
+
+The protocol server supports switching between databases:
+
+### USE Command
+
+```sql
+-- Switch to "production" database
+USE production;
+
+-- Switch to "staging" database
+USE staging;
+```
+
+Databases must be configured in `databases.json`:
+
+```json
+[
+  {
+    "id": "production",
+    "name": "Production",
+    "duckdbPath": "data/production.db"
+  },
+  {
+    "id": "staging",
+    "name": "Staging",
+    "duckdbPath": "data/staging.db"
+  }
+]
+```
+
+### Connection String Database
+
+```bash
+# Connect to specific database
+mysql -h localhost -P 3307 -u duckling -p -D production
+```
+
+## Connection Management
+
+### Idle Timeout
+
+Connections are automatically closed after **8 hours** of inactivity:
+
+```typescript
+const DEFAULT_IDLE_TIMEOUT_MS = 28800 * 1000; // 8 hours
+```
+
+**Error on timeout:**
+```
+ERROR 1205 (HY000): Connection idle timeout
+```
+
+### Connection Limit
+
+When max connections reached:
+
+```
+ERROR 1040 (HY000): Too many connections
+```
+
+Increase limit via `MYSQL_PROTOCOL_MAX_CONNECTIONS` environment variable.
+
+### Active Connections
+
+Query active connection count:
+
+```bash
+curl http://localhost:3001/api/mysql-protocol/stats \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "activeConnections": 12,
+  "maxConnections": 100
+}
+```
+
+## Result Set Formatting
+
+DuckDB results are converted to MySQL wire protocol format:
+
+### Type Mapping
+
+| DuckDB Type | MySQL Column Type | Notes |
+|-------------|-------------------|-------|
+| `INTEGER` | `MYSQL_TYPE_LONG` | 32-bit signed |
+| `BIGINT` | `MYSQL_TYPE_LONGLONG` | 64-bit signed |
+| `DOUBLE` | `MYSQL_TYPE_DOUBLE` | IEEE 754 double |
+| `VARCHAR` | `MYSQL_TYPE_VAR_STRING` | UTF-8 string |
+| `DATE` | `MYSQL_TYPE_DATE` | YYYY-MM-DD |
+| `TIMESTAMP` | `MYSQL_TYPE_TIMESTAMP` | YYYY-MM-DD HH:MM:SS |
+| `BOOLEAN` | `MYSQL_TYPE_TINY` | 0 or 1 |
+| `BLOB` | `MYSQL_TYPE_BLOB` | Binary data |
+
+### NULL Handling
+
+NULL values are encoded using MySQL's NULL bitmap in result packets.
+
+## Performance
+
+### Benchmarks
+
+| Query Type | Latency | Throughput |
+|------------|---------|------------|
+| Simple SELECT (1 row) | ~5ms | 200 qps/connection |
+| Aggregation (1M rows) | ~100ms | 10 qps/connection |
+| Complex JOIN | ~500ms | 2 qps/connection |
+
+<Note>
+  **Performance Tip**: The protocol server adds ~2-3ms overhead for result formatting. For high-throughput applications, use the REST API (`/api/query`) or WebSocket SDK instead.
+</Note>
+
+## Security
+
+### Authentication
+
+Uses `mysql_native_password` (SHA1-based challenge-response):
+
+1. Server sends 20-byte random challenge
+2. Client computes: `SHA1(challenge + SHA1(SHA1(password)))`
+3. Server verifies token using stored `doubleSha1(password)`
+
+### Read-Only Mode
+
+All queries are **read-only**. Write operations return errors:
+
+```sql
+INSERT INTO users (name) VALUES ('Alice');
+-- ERROR: Write operations not supported via MySQL protocol
+```
+
+### SSL/TLS
+
+<Warning>
+  **No SSL Support**: The protocol server does not currently support SSL/TLS. Use SSH tunneling or VPN for encrypted connections.
+</Warning>
+
+SSH Tunnel Example:
+```bash
+ssh -L 3307:localhost:3307 user@duckling-server
+mysql -h 127.0.0.1 -P 3307 -u duckling -p
+```
+
+## Compatibility
+
+### Tested Clients
+
+| Client | Version | Status | Notes |
+|--------|---------|--------|-------|
+| MySQL CLI | 8.0+ | ✅ Works | Full compatibility |
+| DBeaver | 23.0+ | ✅ Works | Minor metadata quirks |
+| TablePlus | 5.0+ | ✅ Works | Requires handshake patch |
+| Sequelize | 6.0+ | ✅ Works | Use text queries |
+| mysql2 (Node) | 3.0+ | ✅ Works | Full compatibility |
+| phpMyAdmin | 5.0+ | ⚠️ Partial | Metadata queries fail |
+
+### Known Issues
+
+**TablePlus Handshake:**
+TablePlus sends unsupported auth flags that crash the parser. A monkey-patch sanitizes the handshake:
+
+```typescript
+// Sanitize client flags (mysqlProtocolServer.ts:82)
+const sanitizedFlags = flags &
+  ~CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA &
+  ~CLIENT_CONNECT_ATTRS;
+```
+
+**Metadata Queries:**
+Some clients query `INFORMATION_SCHEMA` tables that don't exist in DuckDB. These fail gracefully:
+
+```sql
+SELECT * FROM INFORMATION_SCHEMA.PLUGINS;
+-- ERROR: Table does not exist
+```
+
+## Troubleshooting
+
+### Connection Refused
+
+```bash
+ERROR 2003 (HY000): Can't connect to MySQL server on 'localhost:3307'
+```
+
+**Solutions:**
+1. Check `MYSQL_PROTOCOL_ENABLED=true` in `.env`
+2. Restart server: `docker-compose restart duckling-server`
+3. Check port is not blocked: `netstat -tuln | grep 3307`
+
+### Authentication Failed
+
+```bash
+ERROR 1045 (28000): Access denied for user 'duckling'
+```
+
+**Solutions:**
+1. Verify password in `.env` matches client password
+2. Check username is correct (`MYSQL_PROTOCOL_USERNAME`)
+3. Check server logs: `docker-compose logs -f duckling-server | grep "MySQL protocol"`
+
+### Sequence Warnings
+
+If you see sequence warnings in logs:
+
+```
+MySQL protocol sequence warning: expected=1, received=2
+```
+
+This is usually harmless (client sent packets out-of-order). The server auto-resets sequence IDs after each command.
+
+## Code Reference
+
+Implementation: `packages/server/src/services/mysqlProtocolServer.ts`
+
+**Key Classes:**
+- `MySQLProtocolServer` - Main server class (singleton)
+- `ConnectionState` - Per-connection state tracking
+
+**Key Methods:**
+- `start()` - Start MySQL protocol server (line 206)
+- `handleConnection()` - Accept new client (line 267)
+- `authenticate()` - Verify credentials (line 351)
+- `handleQuery()` - Execute SQL query (line 413)
+- `handleInitDb()` - Switch database (line 492)
+
+**Helpers:**
+- `mysqlQueryRouter.ts` - SQL query routing logic
+- `mysqlResultFormatter.ts` - DuckDB → MySQL type conversion
+- `mysqlProtocolUtils.ts` - Auth, flags, logging utilities

@@ -1,0 +1,292 @@
+---
+title: 'Type Support & Mapping'
+description: 'Complete MySQL to DuckDB type mapping reference for Duckling'
+---
+
+## Overview
+
+Duckling provides comprehensive MySQL 8 data type support with automatic mapping to DuckDB types. All standard MySQL types are supported through both full sync (Appender API) and incremental sync (CDC) paths.
+
+## Type Mapping Reference
+
+The following table shows the complete mapping between MySQL 8 types and DuckDB types:
+
+| MySQL Type | DuckDB Column | Appender Method | Full Sync | Incremental Sync | CDC |
+|------------|---------------|-----------------|-----------|------------------|-----|
+| TINYINT | TINYINT | appendTinyInt | ✅ | ✅ | ✅ |
+| SMALLINT | SMALLINT | appendSmallInt | ✅ | ✅ | ✅ |
+| MEDIUMINT | BIGINT | appendBigInt | ✅ | ✅ | ✅ |
+| INT | BIGINT | appendBigInt | ✅ | ✅ | ✅ |
+| INT UNSIGNED | BIGINT | appendBigInt | ✅ | ✅ | ✅ |
+| BIGINT | BIGINT | appendBigInt | ✅ | ✅ | ✅ |
+| BIGINT UNSIGNED | BIGINT | appendBigInt(BigInt) | ✅ | ✅ | ✅ |
+| FLOAT | FLOAT | appendFloat | ✅ | ✅ | ✅ |
+| DOUBLE | DOUBLE | appendDouble | ✅ | ✅ | ✅ |
+| DECIMAL(p,s) | DECIMAL | appendVarchar | ✅ | ✅ | ✅ |
+| CHAR(n) | VARCHAR | appendVarchar | ✅ | ✅ | ✅ |
+| VARCHAR(n) | VARCHAR | appendVarchar | ✅ | ✅ | ✅ |
+| TINYTEXT | TEXT | appendVarchar | ✅ | ✅ | ✅ |
+| TEXT | TEXT | appendVarchar | ✅ | ✅ | ✅ |
+| MEDIUMTEXT | TEXT | appendVarchar | ✅ | ✅ | ✅ |
+| LONGTEXT | TEXT | appendVarchar | ✅ | ✅ | ✅ |
+| BINARY(n) | BLOB | appendBlob | ✅ | ❌ | ❌ |
+| VARBINARY(n) | BLOB | appendBlob | ✅ | ❌ | ❌ |
+| TINYBLOB | BLOB | appendBlob | ✅ | ❌ | ❌ |
+| BLOB | BLOB | appendBlob | ✅ | ❌ | ❌ |
+| MEDIUMBLOB | BLOB | appendBlob | ✅ | ❌ | ❌ |
+| LONGBLOB | BLOB | appendBlob | ✅ | ❌ | ❌ |
+| JSON | JSON | appendVarchar | ✅ | ✅ | ✅ |
+| ENUM | VARCHAR | appendVarchar | ✅ | ✅ | ✅ |
+| SET | VARCHAR | appendVarchar | ✅ | ✅ | ✅ |
+| DATE | DATE | appendVarchar (auto) | ✅ | ✅ | ✅ |
+| TIME | TIME | appendTime | ✅ | ✅ | ✅ |
+| TIME(6) | TIME | appendTime | ✅ | ✅ | ✅ |
+| DATETIME | TIMESTAMP | appendTimestamp | ✅ | ✅ | ✅ |
+| DATETIME(6) | TIMESTAMP | appendTimestamp | ✅ | ✅ | ✅ |
+| TIMESTAMP | TIMESTAMP | appendTimestamp | ✅ | ✅ | ✅ |
+| TIMESTAMP(6) | TIMESTAMP | appendTimestamp | ✅ | ✅ | ✅ |
+| YEAR | VARCHAR | appendVarchar | ✅ | ✅ | ✅ |
+| BIT(n) | VARCHAR | appendVarchar(int) | ✅ | ❌ | ❌ |
+| BOOLEAN | BOOLEAN | appendBoolean | ✅ | ✅ | ✅ |
+
+## Numeric Types
+
+### Integer Types
+
+All MySQL integer types map cleanly to DuckDB equivalents:
+
+- **TINYINT** → TINYINT (8-bit signed)
+- **SMALLINT** → SMALLINT (16-bit signed)
+- **MEDIUMINT** → BIGINT (24-bit promoted to 64-bit)
+- **INT** → BIGINT (32-bit promoted to 64-bit)
+- **BIGINT** → BIGINT (64-bit signed)
+
+<Note>
+MEDIUMINT and INT are promoted to BIGINT in DuckDB for consistency and to avoid overflow issues.
+</Note>
+
+### Unsigned Integer Handling
+
+**INT UNSIGNED** maps to BIGINT since DuckDB doesn't have unsigned types. This provides sufficient range for most use cases.
+
+**BIGINT UNSIGNED** has a known limitation:
+
+<Warning>
+**BIGINT UNSIGNED Overflow**: Values above `9,223,372,036,854,775,807` (BIGINT_MAX) will overflow DuckDB's signed BIGINT and crash the appender. The maximum MySQL unsigned value `18,446,744,073,709,551,615` (2^64-1) cannot be stored.
+</Warning>
+
+### Floating Point Types
+
+- **FLOAT** → FLOAT (32-bit IEEE 754)
+- **DOUBLE** → DOUBLE (64-bit IEEE 754)
+
+Floating point values preserve their precision through replication.
+
+### Decimal Types
+
+MySQL `DECIMAL(p,s)` maps to DuckDB's `DECIMAL` type:
+
+<Warning>
+**DECIMAL Precision**: MySQL `DECIMAL(20,10)` maps to DuckDB's bare `DECIMAL` type. High-precision values may experience truncation depending on the DuckDB DECIMAL width. Integration tests use `assert_contains` on the integer portion rather than exact matching.
+</Warning>
+
+## String Types
+
+### Fixed and Variable Length
+
+- **CHAR(n)** → VARCHAR
+- **VARCHAR(n)** → VARCHAR
+
+Both fixed and variable-length character types map to DuckDB's VARCHAR. Length constraints are not enforced in DuckDB.
+
+### Text Types
+
+All MySQL text variants map to DuckDB TEXT:
+
+- **TINYTEXT** → TEXT
+- **TEXT** → TEXT  
+- **MEDIUMTEXT** → TEXT
+- **LONGTEXT** → TEXT
+
+<Note>
+DuckDB's TEXT type can handle strings of any length, so all MySQL text variants use the same type.
+</Note>
+
+### UTF-8 Support
+
+Full UTF-8 4-byte character support (emoji and special characters) is preserved through replication.
+
+## Binary Types
+
+Binary types have limited support:
+
+- **BINARY(n)** → BLOB (full sync only)
+- **VARBINARY(n)** → BLOB (full sync only)
+- **TINYBLOB** → BLOB (full sync only)
+- **BLOB** → BLOB (full sync only)
+- **MEDIUMBLOB** → BLOB (full sync only)
+- **LONGBLOB** → BLOB (full sync only)
+
+<Warning>
+**Binary Types & CDC**: Binary types (BLOB, BINARY, VARBINARY, TINYBLOB, MEDIUMBLOB, LONGBLOB) and BIT break the `INSERT OR REPLACE` SQL path used by CDC updates. These types are only tested via the full-sync Appender path. The CDC test table (`type_coverage_cdc`) deliberately excludes binary and BIT columns.
+</Warning>
+
+## Special Types
+
+### JSON
+
+**JSON** → JSON (DuckDB native JSON type)
+
+JSON columns map to DuckDB's native JSON type with automatic stringification via `JSON.stringify()`.
+
+```sql
+-- MySQL
+CREATE TABLE products (
+  id INT PRIMARY KEY,
+  metadata JSON
+);
+
+-- DuckDB (after sync)
+CREATE TABLE products (
+  id BIGINT PRIMARY KEY,
+  metadata JSON
+);
+```
+
+### ENUM
+
+**ENUM** → VARCHAR
+
+ENUM values are stored as VARCHAR strings in DuckDB. The set of allowed values is not enforced.
+
+### SET
+
+**SET** → VARCHAR
+
+SET values are stored as comma-separated VARCHAR strings (e.g., `'a,b,c'`).
+
+### BIT
+
+**BIT(n)** → VARCHAR
+
+BIT types are converted to VARCHAR representation of the integer value. Only supported in full sync mode.
+
+## Date and Time Types
+
+### Date
+
+**DATE** → DATE
+
+Date values are automatically converted to ISO string format during replication.
+
+### Time
+
+**TIME** → TIME  
+**TIME(6)** → TIME
+
+Time values with or without fractional seconds are supported.
+
+### Datetime and Timestamp
+
+**DATETIME** → TIMESTAMP  
+**DATETIME(6)** → TIMESTAMP  
+**TIMESTAMP** → TIMESTAMP  
+**TIMESTAMP(6)** → TIMESTAMP
+
+All timestamp types map to DuckDB's TIMESTAMP with fractional second precision preserved.
+
+### Year
+
+**YEAR** → VARCHAR
+
+YEAR type is stored as a VARCHAR string (e.g., `'2024'`).
+
+## Unsupported Types
+
+### Spatial/Geometry Types
+
+<Warning>
+**Spatial Types Not Supported**: MySQL spatial types (`POINT`, `LINESTRING`, `POLYGON`, `GEOMETRY`, `MULTIPOINT`, `MULTILINESTRING`, `MULTIPOLYGON`, `GEOMETRYCOLLECTION`) are not supported.
+
+These columns fall through to the VARCHAR default mapping, which stores the raw binary WKB (Well-Known Binary) representation as a string. Tables with spatial columns will sync but the spatial data is not usable for spatial queries in DuckDB.
+
+DuckDB has a `spatial` extension but Duckling does not perform WKB-to-geometry conversion.
+</Warning>
+
+## Test Coverage
+
+Duckling includes comprehensive integration tests for type fidelity:
+
+### Test Tables
+
+| Table | Purpose | Column Count |
+|-------|---------|-------------|
+| `type_coverage` | Full-sync Appender path testing (all types including binary and BIT) | 27 columns |
+| `type_coverage_cdc` | CDC path testing (non-binary types only) | 19 columns |
+
+### Suite 7: Type Fidelity (Full Sync)
+
+Tests every MySQL 8 type through the Appender path with 3 seed rows:
+
+<Accordion title="Row 1 - Edge Cases">
+Min/max boundary values for each type:
+- TINYINT: -128
+- INT UNSIGNED: 4,294,967,295
+- DOUBLE: max value
+- CHAR(10): full length
+- TIME: max value
+- TIMESTAMP: fractional seconds
+- SET: combinations
+- BIT(1): 1
+- BIT(8): 255
+</Accordion>
+
+<Accordion title="Row 2 - Zero/Empty Values">
+- Zeros for all numeric types
+- Empty strings for text/char
+- Zero TIME
+- Epoch timestamps
+- Empty SET
+- BIT(1): 0
+- BIT(8): 0
+</Accordion>
+
+<Accordion title="Row 3 - NULLs">
+Every nullable column set to NULL. Validates NULL propagation through the Appender pipeline.
+</Accordion>
+
+### Suite 6: CDC Extension Type Fidelity
+
+Tests non-binary types through CDC INSERT and UPDATE paths:
+
+**CDC INSERT**: Inserts 1 row with diverse types (TINYINT -42, SMALLINT 1000, MEDIUMINT 500000, INT UNSIGNED 3000000000, DOUBLE 2.71828, DECIMAL 12345, CHAR 'CDC-TEST', text variants, TIME, YEAR 2024, SET 'b,d'). Validates 12 column values.
+
+**CDC UPDATE**: Updates 5 columns (TINYINT→127, SMALLINT→32767, DOUBLE→-1.0, CHAR→'UPDATED', SET→'a,b,c'). Validates all 5 updated values.
+
+### Test Assertions
+
+| Suite | Assertions |
+|-------|------------|
+| Suite 1: Full Sync | 24 |
+| Suite 2: Incremental Insert | 12 |
+| Suite 3: Incremental Update | 8 |
+| Suite 4: Single Table Sync | 4 |
+| Suite 5: Idempotent Re-sync | 8 |
+| Suite 6: CDC Real-Time (+ type ext) | 35 |
+| Suite 7: Type Fidelity | 64 |
+| **Total** | **~155** |
+
+## Running the Tests
+
+```bash
+cd tests/integration
+chmod +x run.sh
+./run.sh
+```
+
+## Implementation References
+
+- **Type mapping logic**: `packages/server/src/services/sequentialAppenderService.ts`
+- **DuckDB connection**: `packages/server/src/database/duckdb.ts`
+- **Test schema**: `tests/integration/mysql-init/01-schema.sql`
+- **Test runner**: `tests/integration/run.sh`

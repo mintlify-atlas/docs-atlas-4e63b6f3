@@ -1,0 +1,107 @@
+---
+title: Introduction
+description: DuckDB server that replicates your MySQL data with 100-13,000x faster analytical queries through columnar storage.
+---
+
+# Duckling
+
+DuckDB server that replicates your MySQL data. Columnar storage makes analytical queries 100-13,000x faster depending on query shape. Writes are ACID, no partial syncs, no duplicates.
+
+## What it does
+
+Replicates MySQL tables into DuckDB with ACID transactions. Incremental sync only fetches what changed since the last watermark. If you need sub-second replication, there's optional CDC through the MySQL binlog.
+
+Query it over REST, WebSocket, or the MySQL wire protocol on port 3307 (so any MySQL client just works). There's a Nuxt 4 dashboard too. Runs on a $20/month droplet.
+
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Get Duckling running in minutes with Docker
+  </Card>
+  <Card title="Installation" icon="download" href="/installation">
+    Installation options: Docker, manual setup, or development
+  </Card>
+  <Card title="API Reference" icon="code" href="/api">
+    REST endpoints, WebSocket SDK, and query examples
+  </Card>
+  <Card title="Configuration" icon="gear" href="/configuration">
+    Environment variables and tuning options
+  </Card>
+</CardGroup>
+
+## Performance Benchmarks
+
+Real numbers from the benchmark suite with 20M rows:
+
+| Query | MySQL | DuckDB | Speedup |
+|-------|-------|--------|------|
+| Full table count | 4,258 ms | 4 ms | **1,064x** |
+| Filtered count | 1,475 ms | 20 ms | **73x** |
+| Group by status | 433,259 ms | 32 ms | **13,539x** |
+| Region x status breakdown | 16,685 ms | 112 ms | **148x** |
+| Monthly revenue (2023) | 7,536 ms | 30 ms | **251x** |
+| Regional analytics | 446,038 ms | 394 ms | **1,132x** |
+| **Total** | **909,251 ms** | **592 ms** | **1,535x** |
+
+<Note>
+  Run the benchmark yourself:
+  ```bash
+  cd benchmark
+  ./run.sh                        # 20M rows
+  BENCHMARK_SCALE=0.01 ./run.sh   # 200K rows (quick smoke test)
+  ```
+</Note>
+
+## Key Features
+
+| Feature | Details |
+|---------|--------|
+| Data integrity | ACID transactions, primary key constraints |
+| Storage | Single DuckDB file per database, columnar, compressed |
+| Sync modes | Full, incremental (watermark), CDC (binlog) |
+| Query access | REST API, WebSocket SDK, native MySQL protocol (port 3307) |
+| Multi-database | Multiple MySQL sources replicated independently |
+| Schema changes | Additive column evolution, zero downtime |
+
+## How Sync Works
+
+| Mechanism | Trigger | When to use |
+|-----------|---------|-------------|
+| Full sync | Manual or first run | Initial load, disaster recovery |
+| Incremental | Every 15 min (automatic) | Routine catch-up |
+| CDC | MySQL binlog stream | Sub-second replication (opt-in) |
+
+Full and incremental sync batch-read rows from MySQL into DuckDB using `INSERT OR REPLACE`. Watermarks track the last processed ID/timestamp per table. Tables sync in parallel with per-table locking, so a slow table doesn't block the rest.
+
+CDC streams binlog events via [ZongJi](https://github.com/vlasky/zongji), processing inserts, updates, and deletes in order. Binlog position is checkpointed for resume after restarts. Enable with `CDC_ENABLED=true`. It can run alongside scheduled syncs.
+
+## MySQL Wire Protocol
+
+Port 3307 runs a MySQL wire protocol server. Connect with any MySQL client:
+
+```bash
+mysql -h 127.0.0.1 -P 3307 -u duckling -p
+```
+
+If it speaks MySQL, it works. Queries hit DuckDB under the hood.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MYSQL_PROTOCOL_ENABLED` | `true` | Turn the protocol server on/off |
+| `MYSQL_PROTOCOL_PORT` | `3307` | TCP port |
+| `MYSQL_PROTOCOL_USER` | `duckling` | Login username |
+| `MYSQL_PROTOCOL_PASSWORD` | uses `DUCKLING_API_KEY` | Login password |
+| `MYSQL_PROTOCOL_MAX_CONNECTIONS` | `50` | Max concurrent connections |
+
+## Why DuckDB and not X?
+
+**vs MariaDB ColumnStore:** DuckDB is embedded (no separate server), runs on 4GB RAM instead of 128GB, handles empty strings correctly, and costs $20/month instead of $500+. If you have 100TB+ of data, ColumnStore might make more sense. We don't.
+
+**vs ClickHouse:** No ZooKeeper, no cluster management, no JOIN limits, actual ACID transactions. ClickHouse wins when you're ingesting 100K+ rows/sec into 10B+ row tables and have ops people to babysit it.
+
+## Get Started
+
+<CardGroup cols={1}>
+  <Card title="Quick Start Guide" icon="play" href="/quickstart">
+    Follow the quick start to get Duckling running with Docker in under 5 minutes
+  </Card>
+</CardGroup>

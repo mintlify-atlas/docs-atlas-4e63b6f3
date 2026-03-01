@@ -1,0 +1,726 @@
+---
+title: 'Debugging Guide'
+description: 'Comprehensive debugging procedures for Duckling'
+---
+
+## Overview
+
+This guide provides step-by-step debugging procedures for diagnosing and resolving issues with Duckling. Use this guide when troubleshooting sync failures, data inconsistencies, or performance problems.
+
+## Debugging Methodology
+
+### 1. Identify the Problem
+
+<Accordion title="Symptoms Checklist">
+- [ ] Tables not syncing
+- [ ] Missing records in DuckDB
+- [ ] Duplicate records
+- [ ] Slow queries
+- [ ] Sync timeouts
+- [ ] Connection errors
+- [ ] Type conversion errors
+- [ ] Schema mismatch
+</Accordion>
+
+### 2. Gather Information
+
+```bash
+# System health
+curl http://localhost:3001/health
+
+# Detailed status
+curl http://localhost:3001/status
+
+# Recent sync logs
+curl "http://localhost:3001/api/sync-logs?limit=20"
+
+# Error logs
+curl "http://localhost:3001/api/sync-logs?status=error&limit=10"
+
+# Container logs
+docker-compose logs --tail=100 duckdb-server
+```
+
+### 3. Isolate the Issue
+
+Test individual components:
+
+```bash
+# Test MySQL connection
+docker exec duckling-server node scripts/mysql.js "SELECT 1"
+
+# Test DuckDB query
+curl -X POST http://localhost:3001/api/query \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT 1"}'
+
+# Test specific table sync
+curl -X POST http://localhost:3001/api/sync/table/users
+```
+
+## Common Debugging Scenarios
+
+## Scenario 1: Table Not Syncing
+
+### Step 1: Verify Table Exists in MySQL
+
+```bash
+# List all MySQL tables
+docker exec duckling-server node scripts/mysql.js "SHOW TABLES"
+
+# Check specific table
+docker exec duckling-server node scripts/mysql.js "SELECT COUNT(*) FROM table_name"
+```
+
+**Expected**: Table exists and has data.
+
+**If table missing**: Create the table in MySQL first.
+
+### Step 2: Check Excluded Tables
+
+```bash
+# View .env configuration
+cat .env | grep EXCLUDED_TABLES
+```
+
+**Expected**: Table is NOT in the excluded list.
+
+**If excluded**: Remove from `EXCLUDED_TABLES` and restart:
+
+```bash
+docker-compose restart duckdb-server
+curl -X POST http://localhost:3001/api/sync/full
+```
+
+### Step 3: Review Sync Logs
+
+```bash
+# Check sync logs for the table
+curl "http://localhost:3001/api/sync-logs?table=table_name&limit=10"
+```
+
+**Look for**:
+- Sync errors
+- Zero records processed
+- Missing watermark
+
+### Step 4: Trigger Manual Sync
+
+```bash
+# Force full sync for specific table
+curl -X POST http://localhost:3001/api/sync/table/table_name
+
+# Watch logs
+docker-compose logs -f duckdb-server
+```
+
+### Step 5: Verify in DuckDB
+
+```bash
+# Check if table exists
+curl http://localhost:3001/api/tables
+
+# Check row count
+curl http://localhost:3001/api/tables/table_name/count
+```
+
+## Scenario 2: Missing Records
+
+### Step 1: Compare Counts
+
+```bash
+# MySQL count
+docker exec duckling-server node scripts/mysql.js \
+  "SELECT COUNT(*) FROM table_name"
+
+# DuckDB count
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "SELECT COUNT(*) FROM table_name"}'
+
+# Or use validate endpoint
+curl http://localhost:3001/api/sync/validate
+```
+
+**Expected**: Counts should match (or be very close).
+
+### Step 2: Check Watermark Column
+
+```bash
+# Check table structure
+docker exec duckling-server node scripts/mysql.js "DESCRIBE table_name"
+```
+
+<Note>
+**Required for incremental sync**: Table must have one of these columns:
+- `updated_at` / `updatedAt` / `modified_at` / `modifiedAt`
+- `created_at` / `createdAt`
+- `timestamp`
+</Note>
+
+**If missing**: Add watermark column:
+
+```sql
+ALTER TABLE table_name ADD COLUMN updated_at TIMESTAMP 
+  DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
+
+UPDATE table_name SET updated_at = CURRENT_TIMESTAMP;
+```
+
+Then reset sync:
+
+```bash
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "DELETE FROM sync_log WHERE table_name = 'table_name'"}'
+
+curl -X POST http://localhost:3001/api/sync/table/table_name
+```
+
+### Step 3: Check Watermark Value
+
+```bash
+# Check current watermark
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "SELECT * FROM sync_log WHERE table_name = 'table_name' ORDER BY created_at DESC LIMIT 1"}'
+```
+
+**Look for**: `watermark_after` value in JSON.
+
+**Compare with MySQL**:
+
+```bash
+# Latest MySQL record
+docker exec duckling-server node scripts/mysql.js \
+  "SELECT MAX(updated_at) FROM table_name"
+```
+
+**If watermark is ahead of MySQL**: Watermark may be corrupted. Reset it:
+
+```bash
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "DELETE FROM sync_log WHERE table_name = 'table_name'"}'
+```
+
+### Step 4: Test Incremental Query
+
+```bash
+# Simulate incremental sync query
+docker exec duckling-server node scripts/mysql.js \
+  "SELECT COUNT(*) FROM table_name WHERE updated_at >= '2025-03-01 00:00:00'"
+```
+
+**Expected**: Should return records created/updated after watermark.
+
+### Step 5: Force Full Sync
+
+```bash
+# Trigger full sync to re-baseline
+curl -X POST http://localhost:3001/api/sync/table/table_name
+
+# Verify count
+curl http://localhost:3001/api/tables/table_name/count
+```
+
+## Scenario 3: Duplicate Records
+
+### Step 1: Verify Primary Key
+
+```bash
+# Check MySQL primary key
+docker exec duckling-server node scripts/mysql.js \
+  "SHOW CREATE TABLE table_name"
+```
+
+**Look for**: `PRIMARY KEY (id)` in output.
+
+<Warning>
+**No Primary Key**: Tables without primary keys will accumulate duplicates because `INSERT OR REPLACE` requires a primary key to identify duplicates.
+</Warning>
+
+**If missing**: Add primary key:
+
+```sql
+ALTER TABLE table_name ADD PRIMARY KEY (id);
+```
+
+Then recreate DuckDB table:
+
+```bash
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "DROP TABLE table_name"}'
+
+curl -X POST http://localhost:3001/api/sync/table/table_name
+```
+
+### Step 2: Count Duplicates
+
+```bash
+# Check for duplicate primary keys
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "SELECT id, COUNT(*) as cnt FROM table_name GROUP BY id HAVING cnt > 1"}'
+```
+
+**Expected**: Zero results.
+
+**If duplicates found**: Check if table uses composite primary key:
+
+```bash
+# For composite keys
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "SELECT col1, col2, COUNT(*) FROM table_name GROUP BY col1, col2 HAVING COUNT(*) > 1"}'
+```
+
+### Step 3: Check Deduplication Strategy
+
+For append-only tables (fact tables), duplicates are expected and handled by views:
+
+```bash
+# Check total vs unique
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "SELECT COUNT(*) as total, COUNT(DISTINCT id) as unique FROM table_name"}'
+```
+
+**If total > unique**: This is normal for fact tables. Use deduplication view:
+
+```sql
+-- Query deduplicated view
+SELECT * FROM table_name_dedup;
+```
+
+See [Schema Evolution](/guides/schema-evolution) for more on deduplication.
+
+## Scenario 4: Sync Timeouts
+
+### Step 1: Check Network Latency
+
+```bash
+# Test MySQL connectivity
+ping mysql-host
+
+# Test query latency
+time docker exec duckling-server node scripts/mysql.js "SELECT 1"
+```
+
+**Expected**: < 100ms latency.
+
+**If high latency**: Consider moving Duckling closer to MySQL or increasing timeout:
+
+```bash
+# .env
+QUERY_TIMEOUT_MS=60000  # Default is 30000 (30s)
+```
+
+### Step 2: Reduce Batch Size
+
+```bash
+# .env
+BATCH_SIZE=5000  # Default is 10000
+
+# For very slow connections
+BATCH_SIZE=2000
+
+# Restart
+docker-compose restart duckdb-server
+```
+
+### Step 3: Increase Connection Pool
+
+```bash
+# .env
+MYSQL_MAX_CONNECTIONS=10  # Default is 5
+
+# Restart
+docker-compose restart duckdb-server
+```
+
+### Step 4: Check MySQL Slow Query Log
+
+```bash
+# Enable slow query log on MySQL
+SET GLOBAL slow_query_log = 1;
+SET GLOBAL long_query_time = 5;
+
+# Review slow queries
+tail -f /var/log/mysql/slow.log
+```
+
+**Look for**: Queries from Duckling taking > 5 seconds.
+
+### Step 5: Monitor Sync Progress
+
+```bash
+# Watch sync logs in real-time
+curl "http://localhost:3001/api/sync-logs?limit=5" | jq
+
+# Container logs
+docker-compose logs -f duckdb-server
+```
+
+## Scenario 5: Type Conversion Errors
+
+### Step 1: Identify Problematic Column
+
+```bash
+# Check error logs for type errors
+curl "http://localhost:3001/api/sync-logs?status=error&limit=10" | jq
+
+# Container logs
+docker-compose logs --tail=50 duckdb-server | grep "type"
+```
+
+**Look for**: Column name and data type in error message.
+
+### Step 2: Verify Type Mapping
+
+Check [Type Support](/guides/type-support) for supported types.
+
+Common issues:
+- **BIGINT UNSIGNED overflow**: Values > `9,223,372,036,854,775,807`
+- **DECIMAL precision**: High-precision values truncated
+- **Binary types in CDC**: BLOB/BINARY not supported in incremental sync
+- **Spatial types**: Not supported (fall through to VARCHAR)
+
+### Step 3: Sample Problematic Data
+
+```bash
+# Get sample values from MySQL
+docker exec duckling-server node scripts/mysql.js \
+  "SELECT problematic_column FROM table_name LIMIT 5"
+```
+
+### Step 4: Test Type Conversion
+
+```bash
+# Test conversion in DuckDB
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "SELECT CAST('sample_value' AS target_type)"}'
+```
+
+### Step 5: Workaround
+
+Options:
+
+1. **Change MySQL type**:
+   ```sql
+   ALTER TABLE table_name MODIFY column_name VARCHAR(255);
+   ```
+
+2. **Exclude column** (requires code modification)
+
+3. **Transform data** before sync:
+   ```sql
+   -- Create computed column
+   ALTER TABLE table_name ADD COLUMN column_name_str VARCHAR(255) 
+     AS (CAST(column_name AS CHAR));
+   ```
+
+## Debugging Tools
+
+### CLI Tools
+
+```bash
+# Health check
+docker exec duckling-server node packages/server/dist/cli.js health
+
+# System status
+docker exec duckling-server node packages/server/dist/cli.js status
+
+# Validate data
+docker exec duckling-server node packages/server/dist/cli.js validate
+
+# List tables
+docker exec duckling-server node packages/server/dist/cli.js tables
+
+# Query DuckDB
+docker exec duckling-server node packages/server/dist/cli.js query "SELECT COUNT(*) FROM users"
+
+# Query MySQL directly
+docker exec duckling-server node scripts/mysql.js "SELECT COUNT(*) FROM users"
+```
+
+### API Endpoints
+
+```bash
+# Health
+curl http://localhost:3001/health
+
+# Status
+curl http://localhost:3001/status
+
+# Metrics
+curl http://localhost:3001/metrics
+
+# Sync logs
+curl http://localhost:3001/api/sync-logs?limit=50
+
+# Tables
+curl http://localhost:3001/api/tables
+
+# Table schema
+curl http://localhost:3001/api/tables/users/schema
+
+# Table count
+curl http://localhost:3001/api/tables/users/count
+
+# Execute query
+curl -X POST http://localhost:3001/api/query \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT * FROM users LIMIT 10"}'
+
+# Validate counts
+curl http://localhost:3001/api/sync/validate
+```
+
+### Dashboard
+
+Navigate to these pages for visual debugging:
+
+- **Dashboard**: `http://localhost:3000/` - Overview and key metrics
+- **Sync Logs**: `http://localhost:3001/logs.html` - Real-time sync activity
+- **Tables**: `http://localhost:3000/tables` - Table list and schemas
+- **Query**: `http://localhost:3000/query` - Interactive SQL queries
+- **Observability**: `http://localhost:3001/observe` - CPU, memory, query stats
+
+### Logs
+
+```bash
+# Container logs (last 100 lines)
+docker-compose logs --tail=100 duckdb-server
+
+# Follow logs in real-time
+docker-compose logs -f duckdb-server
+
+# Filter for errors
+docker-compose logs duckdb-server | grep ERROR
+
+# Export logs
+docker-compose logs --tail=500 duckdb-server > duckling-logs.txt
+```
+
+### Enable Debug Logging
+
+```bash
+# .env
+LOG_LEVEL=debug  # Options: debug, info, warn, error
+
+# Restart
+docker-compose restart duckdb-server
+
+# View debug logs
+docker-compose logs -f duckdb-server
+```
+
+## Performance Debugging
+
+### Profile Query Performance
+
+```bash
+# DuckDB explain plan
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "EXPLAIN SELECT * FROM large_table WHERE status = 'active'"}'
+
+# DuckDB analyze query
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "EXPLAIN ANALYZE SELECT * FROM large_table WHERE status = 'active'"}'
+```
+
+### Monitor Resource Usage
+
+```bash
+# Container stats
+docker stats duckling-server
+
+# Disk usage
+du -sh data/*.db
+
+# Memory usage
+docker exec duckling-server free -h
+
+# CPU usage
+docker exec duckling-server top -b -n 1
+```
+
+### Check Query Governor
+
+```bash
+# Observability dashboard
+open http://localhost:3001/observe
+
+# Or API endpoint
+curl http://localhost:3001/api/metrics/queries
+```
+
+**Look for**:
+- Active queries
+- Queued queries
+- Query patterns (most frequent, slowest)
+
+### Optimize Sync Performance
+
+<Accordion title="Batch Size Tuning">
+```bash
+# Small tables (< 100K rows)
+BATCH_SIZE=5000
+
+# Medium tables (100K - 1M rows)
+BATCH_SIZE=10000  # Default
+
+# Large tables (> 1M rows)
+BATCH_SIZE=20000
+
+# Very large tables (> 10M rows)
+BATCH_SIZE=50000
+```
+</Accordion>
+
+<Accordion title="Worker Threads Tuning">
+```bash
+# .env
+WORKER_THREADS=0  # Auto-detect (CPU count - 1)
+WORKER_THREADS=4  # Manual setting
+WORKER_THREADS=8  # High-CPU machines
+```
+</Accordion>
+
+<Accordion title="Connection Pool Tuning">
+```bash
+# .env
+MYSQL_MAX_CONNECTIONS=5   # Default
+MYSQL_MAX_CONNECTIONS=10  # High-traffic
+
+DUCKDB_MAX_CONNECTIONS=10  # Default
+DUCKDB_MAX_CONNECTIONS=20  # High query load
+```
+</Accordion>
+
+## Multi-Database Debugging
+
+### Check Database Configuration
+
+```bash
+# List all databases
+curl http://localhost:3001/api/databases
+
+# View databases.json
+cat data/databases.json | jq
+```
+
+### Test Specific Database
+
+```bash
+# Test connection
+curl -X POST http://localhost:3001/api/databases/lms/test
+
+# Health check
+curl 'http://localhost:3001/health?db=lms'
+
+# Sync specific database
+curl -X POST 'http://localhost:3001/api/sync/full?db=lms'
+
+# Query specific database
+curl -X POST 'http://localhost:3001/api/query?db=lms' \
+  -d '{"sql": "SELECT COUNT(*) FROM users"}'
+```
+
+### Check Database Isolation
+
+```bash
+# Verify separate DuckDB files
+ls -lh data/*.db
+
+# Check file sizes
+du -h data/lms.db
+du -h data/common.db
+```
+
+## Advanced Debugging
+
+### Inspect DuckDB File
+
+```bash
+# Connect to DuckDB CLI
+docker exec -it duckling-server bash
+cd /app/data
+duckdb lms.db
+
+# Inside DuckDB CLI
+SHOW TABLES;
+DESCRIBE users;
+SELECT COUNT(*) FROM users;
+.quit
+```
+
+### Inspect Sync Metadata
+
+```bash
+# View sync_log table
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "SELECT * FROM sync_log ORDER BY created_at DESC LIMIT 10"}'
+
+# Check watermarks
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "SELECT table_name, watermark_after FROM sync_log WHERE status = 'success' ORDER BY created_at DESC"}'
+```
+
+### Compare Schemas
+
+```bash
+# MySQL schema
+docker exec duckling-server node scripts/mysql.js "DESCRIBE users"
+
+# DuckDB schema
+curl http://localhost:3001/api/tables/users/schema
+
+# Or via query
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "DESCRIBE users"}'
+```
+
+### Test Automation Services
+
+```bash
+# Check automation status
+curl http://localhost:3001/api/automation/status
+
+# Trigger manual backup
+curl -X POST http://localhost:3001/api/automation/backup
+
+# Trigger manual cleanup
+curl -X POST http://localhost:3001/api/automation/cleanup
+
+# Stop automation
+curl -X POST http://localhost:3001/api/automation/stop
+
+# Start automation
+curl -X POST http://localhost:3001/api/automation/start
+```
+
+## Exporting Debug Information
+
+When reporting issues, export:
+
+```bash
+# 1. Logs
+docker-compose logs --tail=500 duckdb-server > duckling-logs.txt
+
+# 2. Sync logs
+curl "http://localhost:3001/api/sync-logs?limit=100" > sync-logs.json
+
+# 3. Configuration
+cat .env > debug-info.txt
+cat data/databases.json >> debug-info.txt
+
+# 4. System status
+curl http://localhost:3001/status >> debug-info.txt
+
+# 5. Table list
+curl http://localhost:3001/api/tables >> debug-info.txt
+
+# Create archive
+tar -czf duckling-debug.tar.gz duckling-logs.txt sync-logs.json debug-info.txt
+```
+
+## Related Topics
+
+- [Common Issues](/guides/common-issues) - Quick solutions to frequent problems
+- [Type Support](/guides/type-support) - Type mapping and limitations
+- [Schema Evolution](/guides/schema-evolution) - Schema change handling

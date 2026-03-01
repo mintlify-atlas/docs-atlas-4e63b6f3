@@ -1,0 +1,403 @@
+---
+title: 'Database Management'
+description: 'Multi-database configuration and CRUD endpoints'
+---
+
+## Overview
+
+Duckling supports multiple isolated database replicas running on a single server instance. Each database gets its own DuckDB file, connection pool, and sync service.
+
+## Endpoints
+
+### GET /api/databases
+
+List all configured databases.
+
+**Authentication:** Required
+
+**Request Example:**
+```bash
+curl http://localhost:3001/api/databases \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "databases": [
+    {
+      "id": "lms",
+      "name": "LMS Database",
+      "duckdbPath": "data/lms.db",
+      "createdAt": "2025-11-06T18:58:36.480Z",
+      "updatedAt": "2025-11-06T18:58:36.480Z",
+      "s3": {
+        "enabled": true,
+        "bucket": "my-backups",
+        "region": "us-east-1",
+        "secretAccessKey": "***",
+        "encryptionKey": "***"
+      }
+    },
+    {
+      "id": "analytics",
+      "name": "Analytics Database",
+      "duckdbPath": "data/analytics.db",
+      "createdAt": "2025-11-07T10:00:00.000Z",
+      "updatedAt": "2025-11-07T10:00:00.000Z"
+    }
+  ]
+}
+```
+
+<ResponseField name="databases" type="array">
+  Array of database configurations
+</ResponseField>
+
+<ResponseField name="databases[].id" type="string">
+  Unique database identifier (used in `?db=` query parameter)
+</ResponseField>
+
+<ResponseField name="databases[].name" type="string">
+  Human-readable database name
+</ResponseField>
+
+<ResponseField name="databases[].duckdbPath" type="string">
+  Path to DuckDB file on disk
+</ResponseField>
+
+<Info>
+  MySQL connection strings and S3 credentials are **masked** in responses for security.
+</Info>
+
+---
+
+### POST /api/databases
+
+Add a new database configuration.
+
+**Authentication:** Required
+
+**Request Body:**
+<ParamField body="name" type="string" required>
+  Human-readable database name
+</ParamField>
+
+<ParamField body="mysqlConnectionString" type="string" required>
+  MySQL connection string in format: `mysql://user:pass@host:port/database`
+</ParamField>
+
+**Request Example:**
+```bash
+curl -X POST http://localhost:3001/api/databases \
+  -H "Authorization: Bearer $DUCKLING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "E-Commerce Database",
+    "mysqlConnectionString": "mysql://user:password@mysql-host:3306/ecommerce?charset=utf8mb4"
+  }'
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "database": {
+    "id": "ecommerce",
+    "name": "E-Commerce Database",
+    "duckdbPath": "data/ecommerce.db",
+    "createdAt": "2025-11-08T14:30:00.000Z",
+    "updatedAt": "2025-11-08T14:30:00.000Z"
+  }
+}
+```
+
+<ResponseField name="database.id" type="string">
+  Auto-generated unique ID (sanitized from database name)
+</ResponseField>
+
+<ResponseField name="database.duckdbPath" type="string">
+  Auto-generated DuckDB file path: `data/{id}.db`
+</ResponseField>
+
+<Warning>
+  After adding a database, run a full sync to populate the DuckDB replica:
+  ```bash
+  curl -X POST 'http://localhost:3001/sync/full?db=ecommerce' \
+    -H "Authorization: Bearer $DUCKLING_API_KEY"
+  ```
+</Warning>
+
+---
+
+### PUT /api/databases/:id
+
+Update an existing database configuration.
+
+**Authentication:** Required
+
+**Path Parameters:**
+<ParamField path="id" type="string" required>
+  Database ID to update
+</ParamField>
+
+**Request Body:**
+<ParamField body="name" type="string">
+  Updated database name (optional)
+</ParamField>
+
+<ParamField body="mysqlConnectionString" type="string">
+  Updated MySQL connection string (optional)
+</ParamField>
+
+**Request Example:**
+```bash
+curl -X PUT http://localhost:3001/api/databases/lms \
+  -H "Authorization: Bearer $DUCKLING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "LMS Production Database"
+  }'
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "database": {
+    "id": "lms",
+    "name": "LMS Production Database",
+    "duckdbPath": "data/lms.db",
+    "createdAt": "2025-11-06T18:58:36.480Z",
+    "updatedAt": "2025-11-08T15:00:00.000Z"
+  }
+}
+```
+
+<Info>
+  Only `name` and `mysqlConnectionString` fields can be updated. The `id` and `duckdbPath` are immutable.
+</Info>
+
+---
+
+### DELETE /api/databases/:id
+
+Remove a database configuration and close its connections.
+
+**Authentication:** Required
+
+**Path Parameters:**
+<ParamField path="id" type="string" required>
+  Database ID to delete
+</ParamField>
+
+**Request Example:**
+```bash
+curl -X DELETE http://localhost:3001/api/databases/ecommerce \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Database deleted successfully"
+}
+```
+
+<Warning>
+  Deleting a database configuration **does not** delete the DuckDB file on disk. You must manually remove the file if needed:
+  ```bash
+  rm data/ecommerce.db
+  ```
+</Warning>
+
+---
+
+### POST /api/databases/:id/test
+
+Test database connections (both MySQL and DuckDB).
+
+**Authentication:** Required
+
+**Path Parameters:**
+<ParamField path="id" type="string" required>
+  Database ID to test
+</ParamField>
+
+**Request Example:**
+```bash
+curl -X POST http://localhost:3001/api/databases/lms/test \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response (Healthy):**
+```json
+{
+  "success": true,
+  "connections": {
+    "mysql": "healthy",
+    "duckdb": "healthy"
+  }
+}
+```
+
+**Response (Unhealthy):**
+```json
+{
+  "success": false,
+  "error": "MySQL connection failed: ECONNREFUSED"
+}
+```
+
+<Info>
+  Use this endpoint to validate MySQL credentials and network connectivity before adding a database.
+</Info>
+
+---
+
+## Database Configuration File
+
+Database configurations are persisted to `data/databases.json`.
+
+**File Location:**
+- **Host:** `./data/databases.json` (relative to project root)
+- **Container:** `/app/data/databases.json`
+
+**Schema:**
+```json
+[
+  {
+    "id": "lms",
+    "name": "LMS Database",
+    "mysqlConnectionString": "mysql://user:pass@host:3306/chitti_lms?charset=utf8mb4",
+    "duckdbPath": "data/lms.db",
+    "createdAt": "2025-11-06T18:58:36.480Z",
+    "updatedAt": "2025-11-06T18:58:36.480Z",
+    "s3": {
+      "enabled": true,
+      "bucket": "my-duckling-backups",
+      "region": "us-east-1",
+      "accessKeyId": "AKIAIOSFODNN7EXAMPLE",
+      "secretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+      "pathPrefix": "lms/",
+      "encryption": "client-aes256",
+      "encryptionKey": "a3f1c2d4e5b6a7f8..."
+    }
+  }
+]
+```
+
+<Warning>
+  The `databases.json` file contains **sensitive credentials**. Ensure proper file permissions:
+  ```bash
+  chmod 600 data/databases.json
+  ```
+</Warning>
+
+---
+
+## Multi-Database Architecture
+
+### Isolation Model
+
+Each database has its own:
+
+- **DuckDB File** - Separate `.db` file: `data/{id}.db`
+- **Connection Pool** - Isolated MySQL and DuckDB connections
+- **Sync Service** - Independent watermark tracking and sync state
+- **Automation Service** - Separate backup and cleanup schedules
+
+### Query Context
+
+All data endpoints accept the `?db={database_id}` query parameter:
+
+```bash
+# Query LMS database
+curl -X POST 'http://localhost:3001/api/query?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT COUNT(*) FROM User"}'
+
+# Query Analytics database
+curl -X POST 'http://localhost:3001/api/query?db=analytics' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT COUNT(*) FROM Events"}'
+```
+
+### Default Database
+
+If `?db=` is omitted, requests default to the `default` database:
+
+```bash
+# Uses 'default' database
+curl -X POST http://localhost:3001/api/query \
+  -H "Authorization: Bearer $DUCKLING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT COUNT(*) FROM User"}'
+```
+
+---
+
+## Example: Adding a New Database
+
+**Step 1: Add Database Configuration**
+```bash
+curl -X POST http://localhost:3001/api/databases \
+  -H "Authorization: Bearer $DUCKLING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Production Orders",
+    "mysqlConnectionString": "mysql://user:password@prod-mysql:3306/orders"
+  }'
+```
+
+**Step 2: Test Connection**
+```bash
+curl -X POST http://localhost:3001/api/databases/orders/test \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Step 3: Run Initial Sync**
+```bash
+curl -X POST 'http://localhost:3001/sync/full?db=orders' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Step 4: Query the New Database**
+```bash
+curl -X POST 'http://localhost:3001/api/query?db=orders' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT COUNT(*) FROM orders"}'
+```
+
+---
+
+## Error Responses
+
+**400 Bad Request - Missing Fields:**
+```json
+{
+  "success": false,
+  "error": "Name and MySQL connection string are required"
+}
+```
+
+**404 Not Found:**
+```json
+{
+  "success": false,
+  "error": "Database not found"
+}
+```
+
+**500 Internal Server Error:**
+```json
+{
+  "success": false,
+  "error": "Failed to connect to MySQL: ECONNREFUSED"
+}
+```

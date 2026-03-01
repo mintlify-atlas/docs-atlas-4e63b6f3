@@ -1,0 +1,406 @@
+---
+title: Installation
+description: Installation guide for Duckling with Docker, manual setup, and development environment options.
+---
+
+# Installation
+
+Multiple ways to install and run Duckling depending on your needs.
+
+## Docker (Recommended)
+
+The easiest way to run Duckling for production or testing.
+
+### Prerequisites
+
+- Docker Engine 20.10+
+- Docker Compose 2.0+
+- pnpm 10.0.0+
+
+### Installation Steps
+
+<Steps>
+  <Step title="Clone Repository">
+    ```bash
+    git clone <repository>
+    cd duckling
+    ```
+  </Step>
+
+  <Step title="Install Dependencies and Build">
+    ```bash
+    pnpm install
+    pnpm run build
+    ```
+
+    This builds all packages in the monorepo:
+    - `@chittihq/duckling-shared` - Shared types
+    - `@chittihq/duckling-sdk` - WebSocket SDK
+    - `@chittihq/duckling-server` - DuckDB server
+    - `@chittihq/duckling-frontend` - Nuxt 4 dashboard
+  </Step>
+
+  <Step title="Configure Environment">
+    Create your `.env` file:
+
+    ```bash
+    cp .env.example .env
+    ```
+
+    **Required Variables:**
+
+    ```bash .env
+    # Database Configuration
+    MYSQL_CONNECTION_STRING=mysql://user:password@host:port/database
+    DUCKDB_PATH=data/duckling.db
+    MYSQL_MAX_CONNECTIONS=5
+
+    # Security (REQUIRED - generate with: openssl rand -hex 32)
+    ADMIN_USERNAME=admin
+    ADMIN_PASSWORD=your-secure-password
+    DUCKLING_API_KEY=your-secure-api-key
+    SESSION_SECRET=generate-random-secret
+
+    # Sync Configuration
+    SYNC_INTERVAL_MINUTES=15
+    BATCH_SIZE=10000
+    MAX_RETRIES=3
+    ENABLE_INCREMENTAL_SYNC=true
+    AUTO_START_SYNC=false
+    EXCLUDED_TABLES=temp_table,cache_table
+
+    # Health Checks
+    ENABLE_HEALTH_CHECKS=true
+    HEALTH_CHECK_INTERVAL=60000
+
+    # Server
+    NODE_ENV=production
+    PORT=3000
+    LOG_LEVEL=info
+    ```
+
+    <Warning>
+      **Security:** Always use strong passwords and API keys. Generate secure values:
+      ```bash
+      openssl rand -hex 32
+      ```
+    </Warning>
+  </Step>
+
+  <Step title="Start Services">
+    ```bash
+    docker-compose up -d
+    ```
+
+    Access points:
+    - Server API: `http://localhost:3001`
+    - Dashboard: `http://localhost:3000`
+    - MySQL Protocol: `localhost:3307`
+  </Step>
+
+  <Step title="Verify Installation">
+    ```bash
+    # Check server health
+    curl http://localhost:3001/health
+
+    # Check frontend
+    curl http://localhost:3000
+
+    # View logs
+    docker-compose logs -f duckdb-server
+    docker-compose logs -f duckdb-frontend
+    ```
+  </Step>
+</Steps>
+
+### Docker Commands
+
+<CodeGroup>
+  ```bash Start Services
+  docker-compose up -d
+  ```
+
+  ```bash Stop Services
+  docker-compose down
+  ```
+
+  ```bash View Logs
+  # Server logs
+  docker-compose logs -f duckdb-server
+
+  # Frontend logs
+  docker-compose logs -f duckdb-frontend
+  ```
+
+  ```bash Rebuild
+  # Only rebuild when:
+  # - Adding/removing npm packages
+  # - Changing Dockerfile
+  # - Updating system dependencies
+  docker-compose up -d --build
+  ```
+</CodeGroup>
+
+### Port Configuration
+
+Default ports defined in `docker-compose.yml`:
+
+| Service | Container Port | Host Port | Purpose |
+|---------|---------------|-----------|----------|
+| Server (HTTP) | 3000 | 3001 | REST API |
+| Server (MySQL) | 3307 | 3307 | MySQL wire protocol |
+| Frontend | 3000 | 3000 | Nuxt 4 dashboard |
+
+<Note>
+  Change host ports by editing `docker-compose.yml` if you have conflicts:
+  ```yaml
+  ports:
+    - "3002:3000"  # Host:Container
+  ```
+</Note>
+
+## Manual Installation
+
+Run Duckling directly on your system without Docker.
+
+### Prerequisites
+
+- Node.js 20+
+- pnpm 10.0.0+
+- MySQL database (source)
+
+### Steps
+
+<Steps>
+  <Step title="Clone and Install">
+    ```bash
+    git clone <repository>
+    cd duckling
+    pnpm install
+    ```
+  </Step>
+
+  <Step title="Build All Packages">
+    ```bash
+    pnpm run build
+    ```
+
+    This builds the monorepo packages in dependency order:
+    1. `shared` - Type definitions
+    2. `sdk` - WebSocket client
+    3. `server` - DuckDB server
+    4. `frontend` - Dashboard
+  </Step>
+
+  <Step title="Configure Environment">
+    ```bash
+    cp .env.example .env
+    # Edit .env with your settings (see Docker section above)
+    ```
+  </Step>
+
+  <Step title="Start Server">
+    ```bash
+    pnpm run start:server
+    ```
+
+    Server starts on `http://localhost:3000` (or port from `PORT` env var)
+  </Step>
+
+  <Step title="Start Frontend (Optional)">
+    In another terminal:
+
+    ```bash
+    pnpm run start:frontend
+    ```
+
+    Dashboard runs on `http://localhost:3000`
+  </Step>
+</Steps>
+
+### Available Scripts
+
+<CodeGroup>
+  ```bash Server Only
+  pnpm run start:server
+  ```
+
+  ```bash Frontend Only
+  pnpm run start:frontend
+  ```
+
+  ```bash CLI Commands
+  # Health check
+  pnpm run health
+
+  # Trigger full sync
+  pnpm run sync
+
+  # Trigger incremental sync
+  pnpm run sync:incremental
+
+  # System status
+  pnpm run status
+
+  # Validate data
+  pnpm run validate
+  ```
+</CodeGroup>
+
+## Development Setup
+
+For active development with hot reload.
+
+### Prerequisites
+
+- Node.js 20+
+- pnpm 10.0.0+
+- Docker and Docker Compose (recommended)
+
+### Development with Docker (Recommended)
+
+<Steps>
+  <Step title="Start Development Environment">
+    ```bash
+    docker-compose up -d
+    ```
+
+    Both server and frontend start in development mode with hot reload enabled.
+  </Step>
+
+  <Step title="Make Code Changes">
+    Edit files in:
+    - `packages/server/src/` - Server TypeScript files
+    - `packages/frontend/app/` - Frontend Vue components/pages
+    - `packages/shared/src/` - Shared types
+    - `packages/sdk/src/` - SDK source
+
+    Changes are automatically detected and applied (no restart needed).
+  </Step>
+
+  <Step title="View Logs">
+    ```bash
+    # Server logs (with hot reload messages)
+    docker-compose logs -f duckdb-server
+
+    # Frontend logs (with HMR messages)
+    docker-compose logs -f duckdb-frontend
+    ```
+  </Step>
+
+  <Step title="Run Commands Inside Container">
+    ```bash
+    # Build inside container
+    docker exec duckling-server pnpm run build:server
+
+    # CLI commands
+    docker exec duckling-server node packages/server/dist/cli.js health
+    docker exec duckling-server node packages/server/dist/cli.js sync
+    ```
+  </Step>
+</Steps>
+
+### Development without Docker
+
+<Steps>
+  <Step title="Install Dependencies">
+    ```bash
+    pnpm install
+    ```
+  </Step>
+
+  <Step title="Start Development Servers">
+    <CodeGroup>
+      ```bash All Services
+      pnpm run dev
+      ```
+
+      ```bash Server Only
+      pnpm run dev:server
+      ```
+
+      ```bash Frontend Only
+      pnpm run dev:frontend
+      ```
+
+      ```bash SDK Only
+      pnpm run dev:sdk
+      ```
+    </CodeGroup>
+  </Step>
+
+  <Step title="Access Services">
+    - Server: `http://localhost:3000`
+    - Frontend: `http://localhost:3000` (or configured port)
+
+    Hot reload works automatically with nodemon (server) and Nuxt HMR (frontend).
+  </Step>
+</Steps>
+
+### Hot Reload Details
+
+| Service | Watcher | Triggers On | Restart Needed |
+|---------|---------|-------------|----------------|
+| Server | nodemon | `.ts` files in `packages/server/src/` | Automatic |
+| Frontend | Nuxt HMR | `.vue`, `.ts` files in `packages/frontend/` | No (hot module replacement) |
+| Shared | tsc watch | `.ts` files in `packages/shared/src/` | Dependent services restart |
+
+<Note>
+  **When to rebuild containers:**
+  - Adding/removing npm packages
+  - Changing Dockerfiles
+  - Updating system dependencies
+
+  **No rebuild needed for:**
+  - Code changes (hot reload handles it)
+  - `.env` changes (restart service only)
+</Note>
+
+## Monorepo Structure
+
+Duckling uses **pnpm workspaces** for package management:
+
+```
+duckling/
+├── packages/
+│   ├── server/          # @chittihq/duckling-server
+│   │   ├── src/         # TypeScript source
+│   │   ├── dist/        # Compiled JavaScript
+│   │   └── package.json
+│   ├── frontend/        # @chittihq/duckling-frontend
+│   │   ├── app/         # Nuxt pages/components
+│   │   └── package.json
+│   ├── sdk/             # @chittihq/duckling
+│   │   ├── src/         # SDK source
+│   │   └── package.json
+│   └── shared/          # @chittihq/duckling-shared
+│       ├── src/         # Shared types
+│       └── package.json
+├── pnpm-workspace.yaml  # Workspace config
+├── package.json         # Root scripts
+└── docker-compose.yml   # Docker services
+```
+
+### Package Dependencies
+
+- **server** → depends on `shared`
+- **frontend** → depends on `shared`, `sdk`
+- **sdk** → depends on `shared`
+- **shared** → no dependencies (foundation)
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Follow the quick start guide to configure and use Duckling
+  </Card>
+  <Card title="Configuration" icon="gear" href="/configuration">
+    Learn about environment variables and tuning
+  </Card>
+  <Card title="API Reference" icon="code" href="/api">
+    Explore REST endpoints and WebSocket SDK
+  </Card>
+  <Card title="Deployment" icon="server" href="/deployment">
+    Production deployment guide
+  </Card>
+</CardGroup>

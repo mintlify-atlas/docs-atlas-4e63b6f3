@@ -1,0 +1,886 @@
+---
+title: 'Configuration Reference'
+description: 'Complete environment variable and configuration reference'
+icon: 'gear'
+---
+
+## Overview
+
+Duckling uses environment variables for configuration, loaded from a `.env` file. Copy `.env.example` to `.env` and customize for your deployment.
+
+```bash
+cp .env.example .env
+```
+
+## Server Configuration
+
+<ParamField path="NODE_ENV" type="string" default="development">
+  **Environment mode**
+  
+  - `development` - Enable debugging, hot reload
+  - `production` - Optimized for performance
+  
+  ```bash
+  NODE_ENV=production
+  ```
+</ParamField>
+
+<ParamField path="PORT" type="number" default="3000">
+  **HTTP server port**
+  
+  Port for the Express.js server (API + frontend).
+  
+  ```bash
+  PORT=3000
+  ```
+</ParamField>
+
+<ParamField path="DATA_PATH" type="string" default="/app/data">
+  **Base data directory**
+  
+  Root path for all data storage (databases, backups, metadata).
+  
+  - Docker: `/app/data` (volume mounted from `./data`)
+  - Development: `./data` (relative to project root)
+  
+  ```bash
+  DATA_PATH=/app/data
+  ```
+</ParamField>
+
+## Database Configuration
+
+<ParamField path="DUCKDB_PATH" type="string" default="data/duckling.db">
+  **DuckDB database file path**
+  
+  Path to the default DuckDB database file. With multi-database support, individual databases are configured in `databases.json`.
+  
+  ```bash
+  DUCKDB_PATH=data/duckling.db
+  ```
+</ParamField>
+
+<ParamField path="DUCKDB_MAX_CONNECTIONS" type="number" default="10">
+  **DuckDB connection pool size**
+  
+  Maximum concurrent connections to DuckDB per database.
+  
+  ```bash
+  DUCKDB_MAX_CONNECTIONS=10
+  ```
+</ParamField>
+
+<ParamField path="MYSQL_CONNECTION_STRING" type="string">
+  **MySQL source database connection string**
+  
+  Connection string for the source MySQL database to replicate.
+  
+  ```bash
+  MYSQL_CONNECTION_STRING=mysql://user:password@host:port/database?charset=utf8mb4
+  ```
+  
+  <Note>
+    With multi-database support, each database has its own connection string configured via the `/api/databases` endpoint. This variable is used for the default database only.
+  </Note>
+</ParamField>
+
+<ParamField path="MYSQL_MAX_CONNECTIONS" type="number" default="5">
+  **MySQL connection pool size**
+  
+  Maximum concurrent connections to MySQL per database.
+  
+  ```bash
+  MYSQL_MAX_CONNECTIONS=5
+  ```
+  
+  <Warning>
+    Keep this low to avoid overwhelming the source database. 5-10 connections are typically sufficient.
+  </Warning>
+</ParamField>
+
+## Sync Configuration
+
+<ParamField path="SYNC_INTERVAL_MINUTES" type="number" default="15">
+  **Automatic sync frequency**
+  
+  Minutes between automatic incremental sync runs.
+  
+  ```bash
+  SYNC_INTERVAL_MINUTES=15
+  ```
+  
+  <Note>
+    Set to `0` to disable automatic sync (manual triggers only).
+  </Note>
+</ParamField>
+
+<ParamField path="BATCH_SIZE" type="number" default="1000">
+  **Records per batch during sync**
+  
+  Number of records to fetch from MySQL in each batch.
+  
+  ```bash
+  BATCH_SIZE=1000
+  ```
+  
+  <Note>
+    Larger batches are faster but use more memory. 1000-5000 is optimal for most cases.
+  </Note>
+</ParamField>
+
+<ParamField path="INSERT_BATCH_SIZE" type="number" default="2000">
+  **Insert batch size**
+  
+  Number of records to insert per SQL statement during incremental sync.
+  
+  ```bash
+  INSERT_BATCH_SIZE=2000
+  ```
+</ParamField>
+
+<ParamField path="APPENDER_FLUSH_INTERVAL" type="number" default="5000">
+  **Appender flush interval (ms)**
+  
+  Milliseconds between automatic flushes of the DuckDB Appender during full sync.
+  
+  ```bash
+  APPENDER_FLUSH_INTERVAL=5000
+  ```
+</ParamField>
+
+<ParamField path="MAX_RETRIES" type="number" default="3">
+  **Retry attempts for failed operations**
+  
+  Number of times to retry failed sync operations before giving up.
+  
+  ```bash
+  MAX_RETRIES=3
+  ```
+</ParamField>
+
+<ParamField path="RETRY_BASE_DELAY_MS" type="number" default="1000">
+  **Base delay for exponential backoff (ms)**
+  
+  Initial delay in milliseconds before first retry. Doubles on each attempt.
+  
+  ```bash
+  RETRY_BASE_DELAY_MS=1000
+  ```
+</ParamField>
+
+<ParamField path="RETRY_MAX_DELAY_MS" type="number" default="60000">
+  **Maximum retry delay (ms)**
+  
+  Cap for exponential backoff delay.
+  
+  ```bash
+  RETRY_MAX_DELAY_MS=60000
+  ```
+</ParamField>
+
+<ParamField path="ENABLE_INCREMENTAL_SYNC" type="boolean" default="true">
+  **Enable incremental sync**
+  
+  Use watermark-based incremental sync instead of full sync on every run.
+  
+  ```bash
+  ENABLE_INCREMENTAL_SYNC=true
+  ```
+  
+  <Warning>
+    Set to `false` to force full sync on every run (not recommended for large databases).
+  </Warning>
+</ParamField>
+
+<ParamField path="EXCLUDED_TABLES" type="string">
+  **Comma-separated list of tables to exclude**
+  
+  Tables to skip during sync (e.g., temp tables, large logs).
+  
+  ```bash
+  EXCLUDED_TABLES=temp_logs,migration_history,sessions
+  ```
+  
+  <Note>
+    Leave empty to sync all tables.
+  </Note>
+</ParamField>
+
+## Automation Configuration
+
+<ParamField path="AUTO_START_SYNC" type="boolean" default="true">
+  **Auto-start sync on boot**
+  
+  Automatically start sync service when the server starts.
+  
+  ```bash
+  AUTO_START_SYNC=true
+  ```
+</ParamField>
+
+<ParamField path="AUTO_CLEANUP" type="boolean" default="true">
+  **Enable automatic cleanup tasks**
+  
+  Run periodic cleanup tasks (DuckDB VACUUM, WAL cleanup).
+  
+  ```bash
+  AUTO_CLEANUP=true
+  ```
+</ParamField>
+
+<ParamField path="CLEANUP_INTERVAL_HOURS" type="number" default="24">
+  **Hours between cleanup runs**
+  
+  Frequency of automatic cleanup tasks.
+  
+  ```bash
+  CLEANUP_INTERVAL_HOURS=24
+  ```
+</ParamField>
+
+<ParamField path="RETENTION_DAYS" type="number" default="90">
+  **Retention period for cleanup (days)**
+  
+  Number of days to retain old data before cleanup.
+  
+  ```bash
+  RETENTION_DAYS=90
+  ```
+</ParamField>
+
+<ParamField path="AUTO_BACKUP" type="boolean" default="true">
+  **Enable automatic backups**
+  
+  Create local backups on a schedule.
+  
+  ```bash
+  AUTO_BACKUP=true
+  ```
+</ParamField>
+
+<ParamField path="BACKUP_INTERVAL_HOURS" type="number" default="24">
+  **Hours between backups**
+  
+  Frequency of automatic backup creation.
+  
+  ```bash
+  BACKUP_INTERVAL_HOURS=24
+  ```
+</ParamField>
+
+<ParamField path="BACKUP_RETENTION_DAYS" type="number" default="7">
+  **Days to retain backups**
+  
+  Number of days to keep backups before automatic deletion.
+  
+  ```bash
+  BACKUP_RETENTION_DAYS=7
+  ```
+</ParamField>
+
+<ParamField path="AUTO_RESTART" type="boolean" default="true">
+  **Enable auto-restart on failures**
+  
+  Automatically reconnect to databases on connection failures.
+  
+  ```bash
+  AUTO_RESTART=true
+  ```
+</ParamField>
+
+<ParamField path="MAX_RESTART_ATTEMPTS" type="number" default="3">
+  **Maximum recovery attempts**
+  
+  Number of times to attempt recovery before giving up.
+  
+  ```bash
+  MAX_RESTART_ATTEMPTS=3
+  ```
+</ParamField>
+
+<ParamField path="BACKUP_PATH" type="string" default="data/backups">
+  **Backup storage directory**
+  
+  Directory to store local backup files.
+  
+  ```bash
+  BACKUP_PATH=data/backups
+  ```
+</ParamField>
+
+## Monitoring Configuration
+
+<ParamField path="ENABLE_HEALTH_CHECKS" type="boolean" default="true">
+  **Enable health check monitoring**
+  
+  Run periodic health checks on database connections.
+  
+  ```bash
+  ENABLE_HEALTH_CHECKS=true
+  ```
+</ParamField>
+
+<ParamField path="HEALTH_CHECK_INTERVAL" type="number" default="60000">
+  **Health check interval (ms)**
+  
+  Milliseconds between health check runs.
+  
+  ```bash
+  HEALTH_CHECK_INTERVAL=60000
+  ```
+</ParamField>
+
+<ParamField path="LOG_LEVEL" type="string" default="info">
+  **Logging verbosity**
+  
+  Winston log level for application logging.
+  
+  - `error` - Errors only
+  - `warn` - Warnings and errors
+  - `info` - General information
+  - `debug` - Detailed debugging
+  
+  ```bash
+  LOG_LEVEL=info
+  ```
+</ParamField>
+
+## Security & Authentication
+
+<ParamField path="ADMIN_USERNAME" type="string" required>
+  **Admin dashboard username**
+  
+  Username for web dashboard login.
+  
+  ```bash
+  ADMIN_USERNAME=admin
+  ```
+  
+  <Warning>
+    **REQUIRED** for production. Change from the default value.
+  </Warning>
+</ParamField>
+
+<ParamField path="ADMIN_PASSWORD" type="string" required>
+  **Admin dashboard password**
+  
+  Password for web dashboard login.
+  
+  ```bash
+  ADMIN_PASSWORD=your-secure-password-here
+  ```
+  
+  <Warning>
+    **REQUIRED** for production. Use a strong password (16+ characters).
+  </Warning>
+</ParamField>
+
+<ParamField path="DUCKLING_API_KEY" type="string" required>
+  **API key for programmatic access**
+  
+  Bearer token for API authentication.
+  
+  ```bash
+  DUCKLING_API_KEY=your-secure-api-key-here
+  ```
+  
+  Generate a secure key:
+  ```bash
+  openssl rand -hex 32
+  ```
+  
+  Usage:
+  ```bash
+  curl -H "Authorization: Bearer ${DUCKLING_API_KEY}" \
+    http://localhost:3001/api/tables
+  ```
+</ParamField>
+
+<ParamField path="SESSION_SECRET" type="string" required>
+  **Session encryption secret**
+  
+  Secret key for encrypting session cookies.
+  
+  ```bash
+  SESSION_SECRET=generate-with-openssl-rand-hex-32
+  ```
+  
+  Generate:
+  ```bash
+  openssl rand -hex 32
+  ```
+  
+  <Warning>
+    **REQUIRED** for production. Must be a random 64-character hex string.
+  </Warning>
+</ParamField>
+
+<ParamField path="JWT_SECRET" type="string">
+  **JWT signing secret**
+  
+  Secret key for signing JWT tokens. Falls back to `SESSION_SECRET` if not set.
+  
+  ```bash
+  JWT_SECRET=generate-with-openssl-rand-hex-32
+  ```
+</ParamField>
+
+<ParamField path="JWT_EXPIRES_IN" type="string" default="1h">
+  **JWT expiration time**
+  
+  Token lifetime (e.g., `1h`, `7d`, `30m`).
+  
+  ```bash
+  JWT_EXPIRES_IN=1h
+  ```
+</ParamField>
+
+## Rate Limiting
+
+<ParamField path="RATE_LIMIT_ENABLED" type="boolean" default="true">
+  **Enable rate limiting**
+  
+  Protect API endpoints from abuse.
+  
+  ```bash
+  RATE_LIMIT_ENABLED=true
+  ```
+</ParamField>
+
+<ParamField path="RATE_LIMIT_MODE" type="string" default="enforce">
+  **Rate limit mode**
+  
+  - `enforce` - Block requests exceeding limits
+  - `shadow` - Log violations but allow requests
+  
+  ```bash
+  RATE_LIMIT_MODE=enforce
+  ```
+</ParamField>
+
+<ParamField path="RATE_LIMIT_USE_SESSION_SCOPE" type="boolean" default="false">
+  **Use session-based rate limiting**
+  
+  Limit per session instead of per IP address.
+  
+  ```bash
+  RATE_LIMIT_USE_SESSION_SCOPE=false
+  ```
+</ParamField>
+
+<ParamField path="RATE_LIMIT_INCLUDE_DB_SCOPE" type="boolean" default="true">
+  **Include database in rate limit scope**
+  
+  Separate rate limits per database.
+  
+  ```bash
+  RATE_LIMIT_INCLUDE_DB_SCOPE=true
+  ```
+</ParamField>
+
+<ParamField path="RATE_LIMIT_READ_MAX" type="number" default="120">
+  **Read endpoint limit (requests/minute)**
+  
+  Max requests per minute for read operations (GET /tables, /status, etc.).
+  
+  ```bash
+  RATE_LIMIT_READ_MAX=120
+  ```
+</ParamField>
+
+<ParamField path="RATE_LIMIT_QUERY_MAX" type="number" default="80">
+  **Query endpoint limit (requests/minute)**
+  
+  Max requests per minute for query operations (POST /query).
+  
+  ```bash
+  RATE_LIMIT_QUERY_MAX=80
+  ```
+</ParamField>
+
+<ParamField path="RATE_LIMIT_COST_QUERY" type="number" default="1">
+  **Cost per query request**
+  
+  Weight of a query request for rate limiting.
+  
+  ```bash
+  RATE_LIMIT_COST_QUERY=1
+  ```
+</ParamField>
+
+<ParamField path="RATE_LIMIT_COST_WRITE" type="number" default="3">
+  **Cost per write request**
+  
+  Weight of a write request (sync, backup) for rate limiting.
+  
+  ```bash
+  RATE_LIMIT_COST_WRITE=3
+  ```
+</ParamField>
+
+<ParamField path="RATE_LIMIT_JWT_QUERY_MAX_IN_FLIGHT" type="number" default="6">
+  **Max concurrent queries (JWT auth)**
+  
+  Maximum parallel query executions for JWT-authenticated users.
+  
+  ```bash
+  RATE_LIMIT_JWT_QUERY_MAX_IN_FLIGHT=6
+  ```
+</ParamField>
+
+<ParamField path="RATE_LIMIT_APIKEY_QUERY_MAX_IN_FLIGHT" type="number" default="12">
+  **Max concurrent queries (API key auth)**
+  
+  Maximum parallel query executions for API key authentication.
+  
+  ```bash
+  RATE_LIMIT_APIKEY_QUERY_MAX_IN_FLIGHT=12
+  ```
+</ParamField>
+
+<ParamField path="RATE_LIMIT_QUERY_INFLIGHT_TTL_MS" type="number" default="300000">
+  **Query in-flight TTL (ms)**
+  
+  Time to keep in-flight query tracking (5 minutes default).
+  
+  ```bash
+  RATE_LIMIT_QUERY_INFLIGHT_TTL_MS=300000
+  ```
+</ParamField>
+
+## CDC (Change Data Capture)
+
+<ParamField path="CDC_ENABLED" type="boolean" default="false">
+  **Enable CDC mode**
+  
+  Use MySQL binary log replication for real-time sync.
+  
+  ```bash
+  CDC_ENABLED=true
+  ```
+  
+  <Note>
+    CDC is opt-in. Requires MySQL binary logging to be enabled.
+  </Note>
+</ParamField>
+
+<ParamField path="CDC_AUTO_START" type="boolean" default="false">
+  **Auto-start CDC on boot**
+  
+  Automatically start CDC service when server starts.
+  
+  ```bash
+  CDC_AUTO_START=true
+  ```
+</ParamField>
+
+<ParamField path="CDC_RECONNECT_ATTEMPTS" type="number" default="10">
+  **CDC reconnection attempts**
+  
+  Number of times to retry connecting to MySQL binlog.
+  
+  ```bash
+  CDC_RECONNECT_ATTEMPTS=10
+  ```
+</ParamField>
+
+<ParamField path="CDC_RECONNECT_DELAY_MS" type="number" default="5000">
+  **CDC reconnect delay (ms)**
+  
+  Milliseconds between reconnection attempts.
+  
+  ```bash
+  CDC_RECONNECT_DELAY_MS=5000
+  ```
+</ParamField>
+
+<ParamField path="CDC_SSL_REJECT_UNAUTHORIZED" type="boolean" default="true">
+  **Verify SSL certificates for CDC**
+  
+  Reject connections with invalid SSL certificates.
+  
+  ```bash
+  CDC_SSL_REJECT_UNAUTHORIZED=true
+  ```
+</ParamField>
+
+<ParamField path="CDC_MAX_QUEUE_SIZE" type="number" default="5000">
+  **CDC event queue size**
+  
+  Maximum number of CDC events to buffer before applying backpressure.
+  
+  ```bash
+  CDC_MAX_QUEUE_SIZE=5000
+  ```
+</ParamField>
+
+## MySQL Protocol Server
+
+<ParamField path="MYSQL_PROTOCOL_ENABLED" type="boolean" default="true">
+  **Enable MySQL wire protocol**
+  
+  Accept connections from MySQL clients.
+  
+  ```bash
+  MYSQL_PROTOCOL_ENABLED=true
+  ```
+</ParamField>
+
+<ParamField path="MYSQL_PROTOCOL_PORT" type="number" default="3307">
+  **MySQL protocol port**
+  
+  Port for MySQL wire protocol server.
+  
+  ```bash
+  MYSQL_PROTOCOL_PORT=3307
+  ```
+  
+  Connect:
+  ```bash
+  mysql -h localhost -P 3307 -u duckling -p
+  ```
+</ParamField>
+
+<ParamField path="MYSQL_PROTOCOL_DEFAULT_DB" type="string" default="default">
+  **Default database for MySQL connections**
+  
+  Database to use when no database is specified in the connection.
+  
+  ```bash
+  MYSQL_PROTOCOL_DEFAULT_DB=default
+  ```
+</ParamField>
+
+<ParamField path="MYSQL_PROTOCOL_MAX_CONNECTIONS" type="number" default="50">
+  **Max MySQL protocol connections**
+  
+  Maximum concurrent MySQL client connections.
+  
+  ```bash
+  MYSQL_PROTOCOL_MAX_CONNECTIONS=50
+  ```
+</ParamField>
+
+<ParamField path="MYSQL_PROTOCOL_USER" type="string" default="duckling">
+  **MySQL protocol username**
+  
+  Username for MySQL client connections.
+  
+  ```bash
+  MYSQL_PROTOCOL_USER=duckling
+  ```
+</ParamField>
+
+<ParamField path="MYSQL_PROTOCOL_PASSWORD" type="string">
+  **MySQL protocol password**
+  
+  Password for MySQL client connections. Falls back to `DUCKLING_API_KEY`.
+  
+  ```bash
+  MYSQL_PROTOCOL_PASSWORD=your-password-here
+  ```
+</ParamField>
+
+## Query Governor
+
+<ParamField path="MAX_CONCURRENT_QUERIES" type="number" default="10">
+  **Max concurrent queries**
+  
+  Maximum number of queries executing simultaneously.
+  
+  ```bash
+  MAX_CONCURRENT_QUERIES=10
+  ```
+</ParamField>
+
+<ParamField path="QUERY_TIMEOUT_MS" type="number" default="30000">
+  **Query timeout (ms)**
+  
+  Maximum execution time for a single query.
+  
+  ```bash
+  QUERY_TIMEOUT_MS=30000
+  ```
+</ParamField>
+
+<ParamField path="QUERY_QUEUE_MAX" type="number" default="50">
+  **Query queue size**
+  
+  Maximum number of queries to queue when at max concurrency.
+  
+  ```bash
+  QUERY_QUEUE_MAX=50
+  ```
+</ParamField>
+
+## Worker Threads
+
+<ParamField path="WORKER_THREADS" type="number" default="0">
+  **Number of worker threads**
+  
+  Worker threads for parallel query execution. `0` = auto (CPU cores - 1, min 1).
+  
+  ```bash
+  WORKER_THREADS=0
+  ```
+</ParamField>
+
+## Read Replica
+
+<ParamField path="READ_REPLICA_ENABLED" type="boolean" default="false">
+  **Enable read replica mode**
+  
+  Run as a read-only replica of another Duckling instance.
+  
+  ```bash
+  READ_REPLICA_ENABLED=true
+  ```
+</ParamField>
+
+<ParamField path="REPLICA_REFRESH_INTERVAL" type="number" default="300">
+  **Replica refresh interval (seconds)**
+  
+  Seconds between syncing from the primary instance.
+  
+  ```bash
+  REPLICA_REFRESH_INTERVAL=300
+  ```
+</ParamField>
+
+## Error Tracking (Sentry)
+
+<ParamField path="SENTRY_DSN" type="string">
+  **Sentry DSN**
+  
+  Data Source Name for Sentry error tracking.
+  
+  ```bash
+  SENTRY_DSN=https://xxx@xxx.ingest.sentry.io/xxx
+  ```
+</ParamField>
+
+<ParamField path="SENTRY_RELEASE" type="string">
+  **Sentry release version**
+  
+  Release identifier for Sentry tracking.
+  
+  ```bash
+  SENTRY_RELEASE=duckling@1.0.0
+  ```
+</ParamField>
+
+<ParamField path="SENTRY_TRACES_SAMPLE_RATE" type="number" default="0.1">
+  **Sentry trace sampling rate**
+  
+  Percentage of transactions to trace (0.0 to 1.0).
+  
+  ```bash
+  SENTRY_TRACES_SAMPLE_RATE=0.1
+  ```
+</ParamField>
+
+## CORS
+
+<ParamField path="ENABLE_CORS" type="boolean" default="true">
+  **Enable CORS**
+  
+  Allow cross-origin requests from web browsers.
+  
+  ```bash
+  ENABLE_CORS=true
+  ```
+</ParamField>
+
+## Example Configuration
+
+### Production .env
+
+```bash
+# Server
+NODE_ENV=production
+PORT=3000
+
+# Database
+DUCKDB_PATH=data/duckling.db
+MYSQL_MAX_CONNECTIONS=10
+
+# Sync
+SYNC_INTERVAL_MINUTES=15
+BATCH_SIZE=5000
+ENABLE_INCREMENTAL_SYNC=true
+
+# Automation (all enabled by default)
+AUTO_START_SYNC=true
+AUTO_BACKUP=true
+BACKUP_INTERVAL_HOURS=24
+AUTO_RESTART=true
+
+# Monitoring
+ENABLE_HEALTH_CHECKS=true
+LOG_LEVEL=info
+
+# Security (REQUIRED - change these!)
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=$(openssl rand -base64 32)
+DUCKLING_API_KEY=$(openssl rand -hex 32)
+SESSION_SECRET=$(openssl rand -hex 32)
+
+# Rate Limiting
+RATE_LIMIT_ENABLED=true
+RATE_LIMIT_MODE=enforce
+RATE_LIMIT_READ_MAX=120
+RATE_LIMIT_QUERY_MAX=80
+```
+
+### Development .env
+
+```bash
+# Server
+NODE_ENV=development
+PORT=3000
+
+# Database
+DUCKDB_PATH=data/duckling.db
+MYSQL_MAX_CONNECTIONS=5
+
+# Sync
+SYNC_INTERVAL_MINUTES=5
+BATCH_SIZE=1000
+ENABLE_INCREMENTAL_SYNC=true
+
+# Monitoring
+LOG_LEVEL=debug
+
+# Security (dev values - DO NOT use in production)
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=dev123
+DUCKLING_API_KEY=dev-api-key
+SESSION_SECRET=dev-session-secret
+```
+
+## Configuration Validation
+
+The server validates security settings on startup. Check for warnings:
+
+```bash
+docker logs duckling-server | grep -i "security"
+```
+
+**Critical security issues:**
+- `JWT_SECRET` using default value
+- `ADMIN_USERNAME` or `ADMIN_PASSWORD` empty
+- `SESSION_SECRET` not set
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Docker Deployment" icon="docker" href="/deployment/docker">
+    Deploy with Docker and Docker Compose
+  </Card>
+  <Card title="Security" icon="shield" href="/deployment/security">
+    Secure your deployment
+  </Card>
+  <Card title="Production Guide" icon="server" href="/deployment/production">
+    Production best practices
+  </Card>
+</CardGroup>

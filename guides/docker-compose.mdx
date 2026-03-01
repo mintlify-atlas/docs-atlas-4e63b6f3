@@ -1,0 +1,517 @@
+---
+title: 'Docker Compose Setup'
+description: 'Deploy Duckling server and frontend using Docker Compose for development and production'
+icon: 'docker'
+---
+
+## Overview
+
+Duckling provides a complete Docker Compose setup for running both the DuckDB server and Nuxt frontend dashboard. This guide covers development and production deployments.
+
+## Quick Start
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/yourusername/duckling.git
+    cd duckling
+    ```
+  </Step>
+
+  <Step title="Configure environment variables">
+    Create a `.env` file from the example:
+    ```bash
+    cp .env.example .env
+    ```
+
+    Edit `.env` with your configuration:
+    ```bash
+    # Database Configuration
+    MYSQL_CONNECTION_STRING=mysql://user:pass@host:port/database
+    DUCKDB_PATH=data/duckling.db
+
+    # Security & Authentication
+    ADMIN_USERNAME=admin
+    ADMIN_PASSWORD=your-secure-password
+    DUCKLING_API_KEY=your-api-key-here
+    SESSION_SECRET=your-random-secret-key
+
+    # Server Configuration
+    NODE_ENV=development
+    PORT=3000
+    LOG_LEVEL=debug
+    ```
+  </Step>
+
+  <Step title="Start the services">
+    ```bash
+    docker-compose up -d
+    ```
+
+    This starts two services:
+    - **duckling-server**: Backend API at http://localhost:3001
+    - **duckling-frontend**: Dashboard at http://localhost:3000
+  </Step>
+
+  <Step title="Verify the deployment">
+    Check service health:
+    ```bash
+    curl http://localhost:3001/health
+    ```
+
+    Open the dashboard:
+    ```bash
+    open http://localhost:3000
+    ```
+  </Step>
+</Steps>
+
+## Docker Compose Configuration
+
+The `docker-compose.yml` file defines two services:
+
+### Server Service
+
+```yaml
+services:
+  duckdb-server:
+    container_name: duckling-server
+    build:
+      context: .
+      dockerfile: docker/server.Dockerfile
+    ports:
+      - "3001:3000"  # Maps container port 3000 to host port 3001
+      - "3307:3307"  # WebSocket port
+    env_file:
+      - .env
+    environment:
+      # Server configuration
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=${PORT:-3000}
+
+      # Database configuration
+      - DUCKDB_PATH=${DUCKDB_PATH:-data/duckling.db}
+      - MYSQL_CONNECTION_STRING=${MYSQL_CONNECTION_STRING}
+      - MYSQL_MAX_CONNECTIONS=${MYSQL_MAX_CONNECTIONS:-5}
+
+      # Sync configuration
+      - SYNC_INTERVAL_MINUTES=${SYNC_INTERVAL_MINUTES:-15}
+      - BATCH_SIZE=${BATCH_SIZE:-5000}
+      - ENABLE_INCREMENTAL_SYNC=${ENABLE_INCREMENTAL_SYNC:-true}
+
+      # Security & Authentication
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - DUCKLING_API_KEY=${DUCKLING_API_KEY}
+      - SESSION_SECRET=${SESSION_SECRET}
+    volumes:
+      # Data persistence
+      - ./data:/app/data
+      - ./logs:/app/logs
+      # Hot reload - mount source code
+      - ./packages/server/src:/app/packages/server/src
+      - ./packages/shared/src:/app/packages/shared/src
+    restart: unless-stopped
+    networks:
+      - duckdb-network
+```
+
+### Frontend Service
+
+```yaml
+  duckdb-frontend:
+    container_name: duckling-frontend
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    ports:
+      - "3000:3000"  # Nuxt dev server
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - NUXT_PUBLIC_API_BASE=http://localhost:3001
+    volumes:
+      # Hot reload - mount source code
+      - ./packages/frontend/app:/app/packages/frontend/app
+      - ./packages/frontend/nuxt.config.ts:/app/packages/frontend/nuxt.config.ts
+      - ./packages/shared/src:/app/packages/shared/src
+      - ./packages/sdk/src:/app/packages/sdk/src
+    restart: unless-stopped
+    depends_on:
+      - duckdb-server
+    networks:
+      - duckdb-network
+```
+
+## Development Workflow
+
+### Hot Reload
+
+Both containers use hot reload - changes apply automatically without restart:
+
+<Note>
+**Server (nodemon)**: Watches `.ts` files, auto-restarts Node.js process on changes
+
+**Frontend (Nuxt HMR)**: Watches `.vue`, `.ts` files, hot module replacement without page reload
+</Note>
+
+```bash
+# Make code changes, save file, and hot reload handles it automatically
+# No need to run docker-compose restart
+```
+
+### View Logs
+
+<CodeGroup>
+```bash Server Logs
+# Follow server logs
+docker-compose logs -f duckdb-server
+
+# View last 100 lines
+docker-compose logs --tail=100 duckdb-server
+```
+
+```bash Frontend Logs
+# Follow frontend logs
+docker-compose logs -f duckdb-frontend
+
+# View last 100 lines
+docker-compose logs --tail=100 duckdb-frontend
+```
+
+```bash All Logs
+# Follow all service logs
+docker-compose logs -f
+```
+</CodeGroup>
+
+### Run Commands Inside Container
+
+```bash
+# Build server
+docker exec duckling-server pnpm run build:server
+
+# Run CLI commands
+docker exec duckling-server node packages/server/dist/cli.js health
+docker exec duckling-server node packages/server/dist/cli.js sync
+docker exec duckling-server node packages/server/dist/cli.js tables
+
+# Run tests
+docker exec duckling-server pnpm run test
+
+# Lint code
+docker exec duckling-server pnpm run lint
+```
+
+### When to Rebuild
+
+<Note>
+**DO rebuild** (`--build` flag) when:
+- Adding/removing npm packages (any package.json changes)
+- Changing Dockerfile or docker-compose.yml
+- Updating system dependencies (apt packages)
+- Major structural changes (monorepo reorganization)
+</Note>
+
+```bash
+# Rebuild and restart
+docker-compose up -d --build
+
+# Rebuild specific service
+docker-compose up -d --build duckdb-server
+```
+
+**DON'T rebuild** for:
+- Code changes in `.ts` or `.vue` files (hot reload handles it)
+- Configuration changes in `.env` files
+- View/template changes
+
+## Service Management
+
+### Start/Stop Services
+
+<CodeGroup>
+```bash Start All
+# Start all services in background
+docker-compose up -d
+
+# Start and view logs
+docker-compose up
+```
+
+```bash Stop All
+# Stop all services
+docker-compose down
+
+# Stop and remove volumes (WARNING: deletes data)
+docker-compose down -v
+```
+
+```bash Restart Services
+# Restart all services
+docker-compose restart
+
+# Restart specific service
+docker-compose restart duckdb-server
+```
+</CodeGroup>
+
+### Check Service Status
+
+```bash
+# List running containers
+docker-compose ps
+
+# Check resource usage
+docker stats duckling-server duckling-frontend
+```
+
+## Data Persistence
+
+Duckling uses bind mounts for data persistence:
+
+```yaml
+volumes:
+  # Data persistence
+  - ./data:/app/data      # DuckDB files
+  - ./logs:/app/logs      # Server logs
+```
+
+### Directory Structure
+
+```
+duckling/
+├── data/
+│   ├── databases.json       # Multi-database configuration
+│   ├── default.db           # Default DuckDB database
+│   ├── lms.db               # LMS database replica
+│   └── chitti_common.db     # Common database replica
+├── logs/
+│   ├── server.log           # Server logs
+│   ├── sync.log             # Sync operation logs
+│   └── error.log            # Error logs
+└── docker-compose.yml
+```
+
+### Backup Data
+
+```bash
+# Backup DuckDB files
+tar -czf backup-$(date +%Y%m%d).tar.gz data/
+
+# Backup specific database
+cp data/lms.db backups/lms-$(date +%Y%m%d).db
+```
+
+### Restore Data
+
+```bash
+# Stop services
+docker-compose down
+
+# Restore from backup
+tar -xzf backup-20240120.tar.gz
+
+# Restart services
+docker-compose up -d
+```
+
+## Environment Variables
+
+### Database Configuration
+
+| Variable | Description | Default |
+|----------|-------------|----------|
+| `MYSQL_CONNECTION_STRING` | MySQL source connection | Required |
+| `DUCKDB_PATH` | DuckDB file path | `data/duckling.db` |
+| `MYSQL_MAX_CONNECTIONS` | MySQL pool size | `5` |
+
+### Sync Configuration
+
+| Variable | Description | Default |
+|----------|-------------|----------|
+| `SYNC_INTERVAL_MINUTES` | Auto-sync frequency | `15` |
+| `BATCH_SIZE` | Records per batch | `5000` |
+| `ENABLE_INCREMENTAL_SYNC` | Enable incremental sync | `true` |
+| `AUTO_START_SYNC` | Auto-start on boot | `true` |
+
+### Automation Configuration
+
+| Variable | Description | Default |
+|----------|-------------|----------|
+| `AUTO_CLEANUP` | Enable auto cleanup | `true` |
+| `CLEANUP_INTERVAL_HOURS` | Cleanup frequency | `24` |
+| `AUTO_BACKUP` | Enable auto backups | `true` |
+| `BACKUP_INTERVAL_HOURS` | Backup frequency | `24` |
+| `BACKUP_RETENTION_DAYS` | Backup retention | `7` |
+| `AUTO_RESTART` | Auto-restart on failure | `true` |
+
+### Security Configuration
+
+| Variable | Description | Default |
+|----------|-------------|----------|
+| `ADMIN_USERNAME` | Dashboard username | `admin` |
+| `ADMIN_PASSWORD` | Dashboard password | Required |
+| `DUCKLING_API_KEY` | API authentication key | Required |
+| `SESSION_SECRET` | Session encryption key | Required |
+
+## Production Deployment
+
+### Production Configuration
+
+Create a `docker-compose.prod.yml` for production:
+
+```yaml
+services:
+  duckdb-server:
+    container_name: duckling-server
+    image: your-registry/duckling-server:latest
+    ports:
+      - "3001:3000"
+    environment:
+      - NODE_ENV=production
+      - LOG_LEVEL=info
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 2G
+
+  duckdb-frontend:
+    container_name: duckling-frontend
+    image: your-registry/duckling-frontend:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - NUXT_PUBLIC_API_BASE=https://api.yourdomain.com
+    restart: always
+    depends_on:
+      - duckdb-server
+```
+
+### Deploy to Production
+
+```bash
+# Build production images
+docker-compose -f docker-compose.prod.yml build
+
+# Start production services
+docker-compose -f docker-compose.prod.yml up -d
+
+# View production logs
+docker-compose -f docker-compose.prod.yml logs -f
+```
+
+### Health Checks
+
+Add health checks to monitor service availability:
+
+```yaml
+services:
+  duckdb-server:
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+```
+
+### Reverse Proxy with nginx
+
+Use nginx for SSL termination and load balancing:
+
+```nginx
+upstream duckdb_server {
+  server localhost:3001;
+}
+
+upstream duckdb_frontend {
+  server localhost:3000;
+}
+
+server {
+  listen 80;
+  server_name api.yourdomain.com;
+
+  location / {
+    proxy_pass http://duckdb_server;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+  }
+
+  location /ws {
+    proxy_pass http://duckdb_server;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+  }
+}
+
+server {
+  listen 80;
+  server_name dashboard.yourdomain.com;
+
+  location / {
+    proxy_pass http://duckdb_frontend;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+  }
+}
+```
+
+## Troubleshooting
+
+### Container Won't Start
+
+```bash
+# Check container logs
+docker-compose logs duckdb-server
+
+# Check container status
+docker-compose ps
+
+# Rebuild from scratch
+docker-compose down
+docker-compose up -d --build
+```
+
+### Database Connection Issues
+
+```bash
+# Test MySQL connection
+docker exec duckling-server node scripts/mysql.js "SHOW TABLES"
+
+# Check DuckDB health
+curl http://localhost:3001/health
+```
+
+### Port Conflicts
+
+If ports 3000 or 3001 are already in use:
+
+```yaml
+services:
+  duckdb-server:
+    ports:
+      - "3002:3000"  # Change host port to 3002
+
+  duckdb-frontend:
+    ports:
+      - "3003:3000"  # Change host port to 3003
+    environment:
+      - NUXT_PUBLIC_API_BASE=http://localhost:3002
+```
+
+## Next Steps
+
+- [Node.js Integration](/guides/nodejs-integration) - Integrate SDK into applications
+- [Microservices Architecture](/guides/microservices) - Deploy in microservices
+- [Real-Time Dashboards](/guides/real-time-dashboards) - Build live dashboards

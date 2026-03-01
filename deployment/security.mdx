@@ -1,0 +1,723 @@
+---
+title: 'Security Configuration'
+description: 'Secure your Duckling deployment with authentication, rate limiting, and encryption'
+icon: 'shield'
+---
+
+## Overview
+
+Duckling provides multiple layers of security including authentication, rate limiting, session management, and encryption. This guide covers all security features and best practices.
+
+## Authentication
+
+Duckling supports three authentication methods:
+
+### 1. API Key Authentication
+
+**For programmatic access** (scripts, applications, integrations).
+
+<ParamField path="DUCKLING_API_KEY" type="string" required>
+  **API key for Bearer token authentication**
+  
+  Generate a secure key:
+  ```bash
+  openssl rand -hex 32
+  ```
+  
+  Usage:
+  ```bash
+  curl -H "Authorization: Bearer ${DUCKLING_API_KEY}" \
+    http://localhost:3001/api/tables
+  ```
+</ParamField>
+
+**Security considerations:**
+- Store in environment variables, not in code
+- Rotate regularly (recommended: every 90 days)
+- Use separate keys for different environments
+- Never commit to version control
+
+### 2. Session-Based Authentication
+
+**For web dashboard** (cookie-based login).
+
+<ParamField path="ADMIN_USERNAME" type="string" required>
+  **Admin username for dashboard login**
+  
+  ```bash
+  ADMIN_USERNAME=admin
+  ```
+  
+  <Warning>
+    Change from default value before deploying to production.
+  </Warning>
+</ParamField>
+
+<ParamField path="ADMIN_PASSWORD" type="string" required>
+  **Admin password for dashboard login**
+  
+  ```bash
+  ADMIN_PASSWORD=your-secure-password-here
+  ```
+  
+  **Password requirements:**
+  - Minimum 16 characters recommended
+  - Mix of uppercase, lowercase, numbers, symbols
+  - Not based on dictionary words
+  - Unique to this service
+</ParamField>
+
+<ParamField path="SESSION_SECRET" type="string" required>
+  **Secret key for session cookie encryption**
+  
+  ```bash
+  SESSION_SECRET=$(openssl rand -hex 32)
+  ```
+  
+  <Warning>
+    **CRITICAL**: Must be a random 64-character hex string. Never use the same secret across environments.
+  </Warning>
+</ParamField>
+
+### 3. JWT Authentication
+
+**For stateless API access** (mobile apps, SPAs).
+
+<ParamField path="JWT_SECRET" type="string">
+  **JWT signing secret**
+  
+  Falls back to `SESSION_SECRET` if not set.
+  
+  ```bash
+  JWT_SECRET=$(openssl rand -hex 32)
+  ```
+</ParamField>
+
+<ParamField path="JWT_EXPIRES_IN" type="string" default="1h">
+  **JWT token expiration**
+  
+  ```bash
+  JWT_EXPIRES_IN=1h    # 1 hour
+  JWT_EXPIRES_IN=7d    # 7 days
+  JWT_EXPIRES_IN=30m   # 30 minutes
+  ```
+  
+  <Note>
+    Shorter expiration is more secure but requires more frequent re-authentication.
+  </Note>
+</ParamField>
+
+### Login Endpoint
+
+```bash
+# Web dashboard login
+curl -X POST http://localhost:3001/api/login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "admin",
+    "password": "your-password"
+  }'
+
+# Returns JWT token
+{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+}
+```
+
+## Rate Limiting
+
+Duckling includes sophisticated rate limiting to protect against abuse and ensure fair resource allocation.
+
+### Enable Rate Limiting
+
+<ParamField path="RATE_LIMIT_ENABLED" type="boolean" default="true">
+  **Enable rate limiting**
+  
+  ```bash
+  RATE_LIMIT_ENABLED=true
+  ```
+  
+  <Warning>
+    Disable only for testing. **Always enable in production.**
+  </Warning>
+</ParamField>
+
+<ParamField path="RATE_LIMIT_MODE" type="enum" default="enforce">
+  **Rate limit enforcement mode**
+  
+  - `enforce` - Block requests exceeding limits (recommended)
+  - `shadow` - Log violations but allow requests (testing only)
+  
+  ```bash
+  RATE_LIMIT_MODE=enforce
+  ```
+</ParamField>
+
+### Rate Limit Categories
+
+Different endpoint categories have different limits:
+
+<ParamField path="RATE_LIMIT_READ_MAX" type="number" default="120">
+  **Read endpoint limit (requests/minute)**
+  
+  Applies to: `GET /tables`, `GET /status`, `GET /health`
+  
+  ```bash
+  RATE_LIMIT_READ_MAX=120
+  ```
+</ParamField>
+
+<ParamField path="RATE_LIMIT_QUERY_MAX" type="number" default="80">
+  **Query endpoint limit (requests/minute)**
+  
+  Applies to: `POST /query`
+  
+  ```bash
+  RATE_LIMIT_QUERY_MAX=80
+  ```
+</ParamField>
+
+<ParamField path="RATE_LIMIT_WRITE_MAX" type="number" default="10">
+  **Write endpoint limit (requests/minute)**
+  
+  Applies to: `POST /sync/*`, `POST /automation/*`
+  
+  ```bash
+  RATE_LIMIT_WRITE_MAX=10
+  ```
+</ParamField>
+
+<ParamField path="RATE_LIMIT_AUTH_MAX" type="number" default="10">
+  **Authentication endpoint limit (requests/minute)**
+  
+  Applies to: `POST /login`
+  
+  ```bash
+  RATE_LIMIT_AUTH_MAX=10
+  ```
+  
+  <Note>
+    Low limit prevents brute-force attacks.
+  </Note>
+</ParamField>
+
+### Request Costs
+
+Different operations have different "costs" for rate limiting:
+
+<ParamField path="RATE_LIMIT_COST_QUERY" type="number" default="1">
+  **Cost per query request**
+  
+  ```bash
+  RATE_LIMIT_COST_QUERY=1
+  ```
+</ParamField>
+
+<ParamField path="RATE_LIMIT_COST_WRITE" type="number" default="3">
+  **Cost per write request**
+  
+  Write operations (sync, backup) are more expensive.
+  
+  ```bash
+  RATE_LIMIT_COST_WRITE=3
+  ```
+</ParamField>
+
+### Tiered Rate Limits
+
+Authenticated users get higher limits:
+
+| Tier | Multiplier | Applies To |
+|------|------------|------------|
+| Anonymous | 1x | Unauthenticated requests |
+| JWT | 2x | JWT token authentication |
+| API Key | 5x | API key authentication |
+
+```bash
+# Adjust tier multipliers
+RATE_LIMIT_JWT_MULTIPLIER=2
+RATE_LIMIT_APIKEY_MULTIPLIER=5
+```
+
+**Example:**
+- Anonymous: 80 queries/min
+- JWT: 160 queries/min (80 × 2)
+- API Key: 400 queries/min (80 × 5)
+
+### Concurrency Limits
+
+Prevent resource exhaustion from parallel queries:
+
+<ParamField path="RATE_LIMIT_JWT_QUERY_MAX_IN_FLIGHT" type="number" default="6">
+  **Max concurrent queries (JWT)**
+  
+  ```bash
+  RATE_LIMIT_JWT_QUERY_MAX_IN_FLIGHT=6
+  ```
+</ParamField>
+
+<ParamField path="RATE_LIMIT_APIKEY_QUERY_MAX_IN_FLIGHT" type="number" default="12">
+  **Max concurrent queries (API key)**
+  
+  ```bash
+  RATE_LIMIT_APIKEY_QUERY_MAX_IN_FLIGHT=12
+  ```
+</ParamField>
+
+<ParamField path="RATE_LIMIT_QUERY_INFLIGHT_TTL_MS" type="number" default="300000">
+  **In-flight tracking TTL (ms)**
+  
+  Time to keep query tracking data (5 minutes).
+  
+  ```bash
+  RATE_LIMIT_QUERY_INFLIGHT_TTL_MS=300000
+  ```
+</ParamField>
+
+### Rate Limit Scope
+
+<ParamField path="RATE_LIMIT_USE_SESSION_SCOPE" type="boolean" default="false">
+  **Use session-based rate limiting**
+  
+  - `true` - Limit per session ID
+  - `false` - Limit per IP address (default)
+  
+  ```bash
+  RATE_LIMIT_USE_SESSION_SCOPE=false
+  ```
+</ParamField>
+
+<ParamField path="RATE_LIMIT_INCLUDE_DB_SCOPE" type="boolean" default="true">
+  **Include database in rate limit scope**
+  
+  - `true` - Separate limits per database (recommended)
+  - `false` - Global limits across all databases
+  
+  ```bash
+  RATE_LIMIT_INCLUDE_DB_SCOPE=true
+  ```
+</ParamField>
+
+## MySQL Protocol Authentication
+
+Duckling exposes a MySQL-compatible wire protocol on port 3307.
+
+<ParamField path="MYSQL_PROTOCOL_USER" type="string" default="duckling">
+  **MySQL protocol username**
+  
+  ```bash
+  MYSQL_PROTOCOL_USER=duckling
+  ```
+</ParamField>
+
+<ParamField path="MYSQL_PROTOCOL_PASSWORD" type="string">
+  **MySQL protocol password**
+  
+  Falls back to `DUCKLING_API_KEY` if not set.
+  
+  ```bash
+  MYSQL_PROTOCOL_PASSWORD=your-password-here
+  ```
+</ParamField>
+
+**Connect with MySQL client:**
+
+```bash
+mysql -h localhost -P 3307 -u duckling -p
+# Enter password: <MYSQL_PROTOCOL_PASSWORD or DUCKLING_API_KEY>
+```
+
+## CORS Configuration
+
+<ParamField path="ENABLE_CORS" type="boolean" default="true">
+  **Enable Cross-Origin Resource Sharing**
+  
+  ```bash
+  ENABLE_CORS=true
+  ```
+  
+  <Note>
+    CORS is required for browser-based applications. Disable only if all clients are server-side.
+  </Note>
+</ParamField>
+
+## Encryption
+
+### Session Cookie Encryption
+
+Session cookies are encrypted using `SESSION_SECRET`.
+
+```bash
+# Generate secure session secret
+SESSION_SECRET=$(openssl rand -hex 32)
+```
+
+### S3 Backup Encryption
+
+S3 backups support multiple encryption modes:
+
+| Mode | Security | Use Case |
+|------|----------|----------|
+| `none` | No encryption | Development only |
+| `sse-s3` | AWS-managed keys | Good for most cases |
+| `sse-kms` | AWS KMS + audit trail | Compliance requirements |
+| `client-aes256` | Client-side (best) | **Recommended for production** |
+
+**Client-side encryption (recommended):**
+
+```bash
+# Generate 32-byte encryption key
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+Configure via API:
+
+```bash
+curl -X PUT http://localhost:3001/api/databases/production/s3 \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "enabled": true,
+    "bucket": "my-backups",
+    "region": "us-east-1",
+    "accessKeyId": "AKIAIOSFODNN7EXAMPLE",
+    "secretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    "encryption": "client-aes256",
+    "encryptionKey": "a3f1c2d4e5b6a7f8..."
+  }'
+```
+
+**Benefits of client-side encryption:**
+- Encryption key never leaves your server
+- Protects against compromised AWS credentials
+- Protects against bucket misconfiguration
+- HMAC integrity verification on restore
+
+## Security Validation
+
+Duckling validates security configuration on startup.
+
+### Check for Security Issues
+
+```bash
+# View startup logs
+docker logs duckling | grep -i "security"
+
+# Check via API
+curl http://localhost:3001/health
+```
+
+**Critical issues that prevent startup:**
+- `JWT_SECRET` using default value
+- `ADMIN_USERNAME` or `ADMIN_PASSWORD` empty
+- `SESSION_SECRET` not set
+
+## Network Security
+
+### Firewall Rules
+
+**Minimum required ports:**
+
+```bash
+# Allow HTTPS only (recommended)
+allow 443/tcp from anywhere
+
+# Or HTTP (requires reverse proxy)
+allow 80/tcp from anywhere
+
+# MySQL protocol (optional)
+allow 3307/tcp from trusted IPs only
+
+# Deny all other inbound traffic
+deny from anywhere
+```
+
+### Reverse Proxy with SSL/TLS
+
+**Nginx with Let's Encrypt:**
+
+```nginx
+server {
+  listen 443 ssl http2;
+  server_name duckling.example.com;
+
+  ssl_certificate /etc/letsencrypt/live/duckling.example.com/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/duckling.example.com/privkey.pem;
+  
+  # Strong SSL configuration
+  ssl_protocols TLSv1.2 TLSv1.3;
+  ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256';
+  ssl_prefer_server_ciphers off;
+  
+  # HSTS (force HTTPS)
+  add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+  
+  # Security headers
+  add_header X-Frame-Options "SAMEORIGIN" always;
+  add_header X-Content-Type-Options "nosniff" always;
+  add_header X-XSS-Protection "1; mode=block" always;
+  
+  location / {
+    proxy_pass http://localhost:3000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+}
+```
+
+### VPN/Private Network
+
+For maximum security, deploy Duckling in a private network:
+
+```bash
+# AWS VPC
+# Only allow access from VPN or bastion host
+
+# Docker network
+docker network create --internal duckling-private
+docker run --network duckling-private duckling:latest
+```
+
+## MySQL Source Security
+
+### Read-Only User
+
+Create a dedicated read-only MySQL user for Duckling:
+
+```sql
+CREATE USER 'duckling'@'%' IDENTIFIED BY 'secure-password';
+GRANT SELECT, SHOW VIEW ON database_name.* TO 'duckling'@'%';
+FLUSH PRIVILEGES;
+```
+
+### Connection Encryption
+
+Use SSL/TLS for MySQL connections:
+
+```bash
+MYSQL_CONNECTION_STRING=mysql://user:pass@host:3306/db?ssl={"rejectUnauthorized":true}
+```
+
+### IP Allowlisting
+
+Restrict MySQL access to Duckling server IP:
+
+```sql
+CREATE USER 'duckling'@'<duckling-server-ip>' IDENTIFIED BY 'secure-password';
+GRANT SELECT ON database_name.* TO 'duckling'@'<duckling-server-ip>';
+```
+
+## Audit Logging
+
+### Enable Detailed Logging
+
+```bash
+LOG_LEVEL=info  # or 'debug' for more detail
+```
+
+### Log Rotation
+
+```bash
+# Docker log rotation
+docker run -d \
+  --log-driver=json-file \
+  --log-opt max-size=100m \
+  --log-opt max-file=10 \
+  duckling:latest
+```
+
+### Centralized Logging
+
+```bash
+# Send logs to syslog
+docker run -d \
+  --log-driver=syslog \
+  --log-opt syslog-address=udp://logserver:514 \
+  duckling:latest
+```
+
+### Sentry Error Tracking
+
+```bash
+SENTRY_DSN=https://xxx@xxx.ingest.sentry.io/xxx
+SENTRY_RELEASE=duckling@1.0.0
+```
+
+## Security Checklist
+
+<Check>
+  **Authentication configured**
+  - [ ] `DUCKLING_API_KEY` set to random 64-char hex
+  - [ ] `ADMIN_PASSWORD` changed from default (16+ characters)
+  - [ ] `SESSION_SECRET` set to random 64-char hex
+  - [ ] `JWT_SECRET` set (or using `SESSION_SECRET`)
+  - [ ] Default credentials never used in production
+</Check>
+
+<Check>
+  **Rate limiting enabled**
+  - [ ] `RATE_LIMIT_ENABLED=true`
+  - [ ] `RATE_LIMIT_MODE=enforce`
+  - [ ] Limits tuned for expected traffic
+  - [ ] Concurrency limits set
+</Check>
+
+<Check>
+  **Network security**
+  - [ ] Reverse proxy with SSL/TLS
+  - [ ] Firewall rules configured
+  - [ ] Unnecessary ports closed
+  - [ ] HTTPS enforced (no HTTP)
+</Check>
+
+<Check>
+  **MySQL source security**
+  - [ ] Read-only MySQL user created
+  - [ ] MySQL connection uses SSL/TLS
+  - [ ] IP allowlisting configured
+  - [ ] Strong MySQL password
+</Check>
+
+<Check>
+  **Data encryption**
+  - [ ] S3 backups use client-side encryption
+  - [ ] Encryption keys stored securely
+  - [ ] Session cookies encrypted
+  - [ ] HTTPS for all web traffic
+</Check>
+
+<Check>
+  **Monitoring & logging**
+  - [ ] Log level set appropriately
+  - [ ] Log rotation configured
+  - [ ] Centralized logging (optional)
+  - [ ] Error tracking (Sentry) configured
+</Check>
+
+<Check>
+  **Access control**
+  - [ ] Principle of least privilege
+  - [ ] Separate credentials per environment
+  - [ ] Regular credential rotation
+  - [ ] API keys stored in secrets manager
+</Check>
+
+## Credential Rotation
+
+### API Key Rotation
+
+```bash
+# 1. Generate new key
+NEW_API_KEY=$(openssl rand -hex 32)
+
+# 2. Update .env
+DUCKLING_API_KEY=${NEW_API_KEY}
+
+# 3. Restart container
+docker restart duckling
+
+# 4. Update all clients to use new key
+```
+
+### Session Secret Rotation
+
+```bash
+# 1. Generate new secret
+NEW_SESSION_SECRET=$(openssl rand -hex 32)
+
+# 2. Update .env
+SESSION_SECRET=${NEW_SESSION_SECRET}
+
+# 3. Restart container (invalidates all sessions)
+docker restart duckling
+
+# 4. Users must re-login
+```
+
+### S3 Encryption Key Rotation
+
+<Warning>
+  **Critical**: Rotating S3 encryption keys requires re-encrypting all backups. Plan carefully.
+</Warning>
+
+```bash
+# 1. Generate new encryption key
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+
+# 2. Update S3 config via API
+curl -X PUT http://localhost:3001/api/databases/production/s3 \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}" \
+  -d '{"encryptionKey": "new-key-here"}'
+
+# 3. Trigger new backup (old backups remain with old key)
+curl -X POST 'http://localhost:3001/api/backups/s3?db=production' \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+
+# 4. Keep old key until old backups expire
+```
+
+## Incident Response
+
+### Suspected API Key Compromise
+
+1. **Immediately rotate** `DUCKLING_API_KEY`
+2. Review access logs for unauthorized access
+3. Check for data exfiltration
+4. Update all legitimate clients
+5. Consider enabling IP allowlisting
+
+### Suspected Admin Credential Compromise
+
+1. **Immediately change** `ADMIN_PASSWORD`
+2. Rotate `SESSION_SECRET` (invalidates all sessions)
+3. Review audit logs for unauthorized actions
+4. Check for configuration changes
+5. Verify database integrity
+
+### Suspected Database Compromise
+
+1. **Immediately stop sync** to prevent further damage
+2. Restore from known-good backup
+3. Review MySQL source for tampering
+4. Verify DuckDB file integrity
+5. Re-sync after validation
+
+## Compliance Considerations
+
+### GDPR
+
+- Encrypt data at rest (S3 client-side encryption)
+- Encrypt data in transit (SSL/TLS)
+- Access logging and audit trails
+- Right to deletion (backup cleanup)
+
+### HIPAA
+
+- Use `sse-kms` or `client-aes256` for S3 backups
+- Enable audit logging
+- Restrict access to PHI
+- Encrypt all network traffic
+
+### SOC 2
+
+- Enable Sentry error tracking
+- Centralized logging
+- Access control (API keys, rate limiting)
+- Regular credential rotation
+- Backup encryption
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Production Guide" icon="server" href="/deployment/production">
+    Production deployment best practices
+  </Card>
+  <Card title="Configuration" icon="gear" href="/deployment/configuration">
+    Full environment variable reference
+  </Card>
+  <Card title="Docker Deployment" icon="docker" href="/deployment/docker">
+    Docker deployment guide
+  </Card>
+</CardGroup>

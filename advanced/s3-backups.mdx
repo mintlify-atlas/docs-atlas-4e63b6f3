@@ -1,0 +1,538 @@
+---
+title: "S3 Cloud Backup Configuration"
+description: "Automated S3 backups with client-side encryption for disaster recovery"
+---
+
+# S3 Cloud Backup Configuration
+
+Duckling supports automated S3 cloud backups for disaster recovery. Production DuckDB replicas can reach 200+ GB, making a full resync from MySQL take hours. S3 backups enable fast recovery by downloading a pre-built `.db` file instead of re-streaming from MySQL.
+
+## Overview
+
+S3 backup configuration is **per-database** and stored in `databases.json`. Backups can be triggered manually or run automatically on a schedule.
+
+**Key Features:**
+- Per-database S3 configuration
+- Four encryption modes: none, SSE-S3, SSE-KMS, client-side AES-256
+- Streaming upload (no temp files, works for 500+ GB databases)
+- HMAC integrity verification (client-side encryption only)
+- S3-compatible providers supported (MinIO, R2, B2, Spaces)
+
+## Environment Variables
+
+S3 credentials are stored **per-database** in `databases.json` (not environment variables).
+
+Global automation settings:
+
+<ParamField path="AUTO_BACKUP" type="boolean" default="true">
+  Enable automatic backups (local + S3 if configured)
+</ParamField>
+
+<ParamField path="BACKUP_INTERVAL_HOURS" type="number" default="24">
+  Hours between automatic backups (applies to both local and S3)
+</ParamField>
+
+<ParamField path="BACKUP_RETENTION_DAYS" type="number" default="7">
+  Days to retain local backups (S3 retention managed via lifecycle policies)
+</ParamField>
+
+## S3 Configuration Schema
+
+S3 config is stored inside each database entry in `databases.json`:
+
+```json
+[
+  {
+    "id": "production",
+    "name": "Production Database",
+    "mysqlConnectionString": "mysql://...",
+    "duckdbPath": "data/production.db",
+    "s3": {
+      "enabled": true,
+      "bucket": "my-duckling-backups",
+      "region": "us-east-1",
+      "accessKeyId": "AKIAIOSFODNN7EXAMPLE",
+      "secretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+      "endpoint": null,
+      "forcePathStyle": false,
+      "pathPrefix": "production/",
+      "encryption": "client-aes256",
+      "kmsKeyId": null,
+      "encryptionKey": "a3f1c2d4e5b6a7f8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2"
+    }
+  }
+]
+```
+
+### Required Fields
+
+<ParamField path="enabled" type="boolean" required>
+  Enable S3 backups for this database
+</ParamField>
+
+<ParamField path="bucket" type="string" required>
+  S3 bucket name (e.g., `my-duckling-backups`)
+</ParamField>
+
+<ParamField path="region" type="string" required>
+  AWS region (e.g., `us-east-1`) or region for S3-compatible provider
+</ParamField>
+
+<ParamField path="accessKeyId" type="string" required>
+  AWS access key ID or equivalent for S3-compatible provider
+</ParamField>
+
+<ParamField path="secretAccessKey" type="string" required>
+  AWS secret access key (stored in `databases.json`, masked in API responses)
+</ParamField>
+
+### Optional Fields
+
+<ParamField path="endpoint" type="string" default="null">
+  Custom S3 endpoint for S3-compatible providers (MinIO, R2, B2, Spaces). Leave blank for AWS S3.
+</ParamField>
+
+<ParamField path="forcePathStyle" type="boolean" default="false">
+  Use path-style URLs (e.g., `https://endpoint/bucket/key`). Required for MinIO and most self-hosted providers.
+</ParamField>
+
+<ParamField path="pathPrefix" type="string" default="{database_id}/">
+  S3 key prefix for backups (e.g., `production/` → `production/backup-2025-03-01T12-00-00-000Z.db`)
+</ParamField>
+
+<ParamField path="encryption" type="'none' | 'sse-s3' | 'sse-kms' | 'client-aes256'" default="none">
+  Encryption mode (see [Encryption Modes](#encryption-modes) section)
+</ParamField>
+
+<ParamField path="kmsKeyId" type="string" default="null">
+  KMS key ARN for `sse-kms` mode (optional, uses default KMS key if omitted)
+</ParamField>
+
+<ParamField path="encryptionKey" type="string" default="null">
+  64-character hex string (32 bytes / 256 bits) for `client-aes256` mode. Generate with:
+  ```bash
+  node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+  ```
+</ParamField>
+
+## Encryption Modes
+
+Duckling supports four encryption modes for S3 backups:
+
+| Mode | Who Holds Key | Protects Against | Overhead |
+|------|---------------|------------------|----------|
+| **none** | — | Nothing | Zero |
+| **sse-s3** | AWS (managed) | Physical media theft | Zero |
+| **sse-kms** | AWS KMS | Physical media theft + audit trail | ~1 ms/request |
+| **client-aes256** | You (in `databases.json`) | Compromised AWS credentials, bucket misconfiguration | Streaming, no memory spike |
+
+### Encryption Mode: `none`
+
+No encryption. Backup uploaded as plaintext.
+
+```json
+"encryption": "none"
+```
+
+**Use Case:** Development environments, non-sensitive data
+
+### Encryption Mode: `sse-s3`
+
+Server-side encryption using AWS-managed keys (AES-256).
+
+```json
+"encryption": "sse-s3"
+```
+
+**How it works:**
+- Duckling sends `ServerSideEncryption: AES256` header
+- AWS encrypts data at rest using AWS-managed keys
+- AWS decrypts automatically on download
+
+**Use Case:** Basic encryption with zero configuration
+
+### Encryption Mode: `sse-kms`
+
+Server-side encryption using AWS KMS (Key Management Service).
+
+```json
+"encryption": "sse-kms",
+"kmsKeyId": "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012"
+```
+
+**How it works:**
+- Duckling sends `ServerSideEncryption: aws:kms` + `SSEKMSKeyId` header
+- AWS encrypts data using specified KMS key
+- AWS decrypts automatically on download (requires KMS permissions)
+
+**Benefits:**
+- Audit trail (CloudTrail logs all KMS API calls)
+- Key rotation policies
+- Fine-grained access control (IAM policies)
+
+**Use Case:** Compliance requirements (HIPAA, PCI-DSS), centralized key management
+
+### Encryption Mode: `client-aes256`
+
+**Recommended for production.** Client-side encryption using AES-256-CTR before upload.
+
+```json
+"encryption": "client-aes256",
+"encryptionKey": "a3f1c2d4e5b6a7f8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2"
+```
+
+**How it works:**
+1. Generate random 16-byte IV (initialization vector)
+2. Encrypt database file using AES-256-CTR (streaming)
+3. Compute HMAC-SHA256 over IV + ciphertext
+4. Upload encrypted file to S3 (format: `[16-byte IV][ciphertext]`)
+5. Upload HMAC to companion `.mac` object
+
+**On restore:**
+1. Download encrypted file + `.mac` companion
+2. Compute HMAC and verify against stored value
+3. Decrypt file using AES-256-CTR (streaming)
+4. Replace primary DuckDB file
+
+**Benefits:**
+- **Zero Trust**: AWS never sees your data in plaintext
+- **Bucket Misconfiguration Protection**: Even if bucket is public, data is encrypted
+- **Compromised Credentials**: Attackers can't read data without encryption key
+- **Streaming**: No memory spike (handles 500+ GB databases)
+
+**Use Case:** Production databases with sensitive data
+
+<Warning>
+  **Key Management**: The encryption key is stored in `databases.json`. Backup this file securely! If you lose the key, backups are **unrecoverable**.
+</Warning>
+
+## S3-Compatible Providers
+
+Duckling supports S3-compatible object storage providers:
+
+| Provider | `endpoint` | `forcePathStyle` |
+|----------|-----------|------------------|
+| **AWS S3** | _(leave blank)_ | `false` |
+| **Cloudflare R2** | `https://<account_id>.r2.cloudflarestorage.com` | `false` |
+| **Backblaze B2** | `https://s3.<region>.backblazeb2.com` | `false` |
+| **DigitalOcean Spaces** | `https://<region>.digitaloceanspaces.com` | `false` |
+| **MinIO (self-hosted)** | `https://minio.internal:9000` | **`true`** |
+
+### Example: Cloudflare R2
+
+```json
+"s3": {
+  "enabled": true,
+  "bucket": "my-duckling-backups",
+  "region": "auto",
+  "accessKeyId": "<R2_ACCESS_KEY_ID>",
+  "secretAccessKey": "<R2_SECRET_ACCESS_KEY>",
+  "endpoint": "https://<account_id>.r2.cloudflarestorage.com",
+  "forcePathStyle": false,
+  "encryption": "client-aes256",
+  "encryptionKey": "..."
+}
+```
+
+### Example: MinIO
+
+```json
+"s3": {
+  "enabled": true,
+  "bucket": "duckling-backups",
+  "region": "us-east-1",
+  "accessKeyId": "minioadmin",
+  "secretAccessKey": "minioadmin",
+  "endpoint": "http://minio.local:9000",
+  "forcePathStyle": true,
+  "encryption": "none"
+}
+```
+
+## Backup File Format
+
+### Unencrypted Backups
+
+Standard DuckDB `.db` file:
+
+```
+s3://my-bucket/production/backup-2025-03-01T12-00-00-000Z.db
+```
+
+### Client-Side Encrypted Backups
+
+Encrypted file + companion HMAC:
+
+```
+s3://my-bucket/production/backup-2025-03-01T12-00-00-000Z.db
+s3://my-bucket/production/backup-2025-03-01T12-00-00-000Z.db.mac
+```
+
+**File Format:**
+```
+[16 bytes AES-256-CTR IV][AES-256-CTR ciphertext]
+```
+
+**HMAC Computation:**
+```
+HMAC-SHA256(encryptionKey, IV || ciphertext)
+```
+
+The `.mac` file contains the HMAC hex string for integrity verification.
+
+## Automated Backups
+
+When `AUTO_BACKUP=true` and `s3.enabled=true`, Duckling automatically:
+
+1. Creates local backup every `BACKUP_INTERVAL_HOURS` hours
+2. Uploads local backup to S3
+3. Deletes local backup after `BACKUP_RETENTION_DAYS` days
+
+**Automation Flow:**
+```text
+Scheduler → Create Local Backup → Upload to S3 → Cleanup Old Local Backups
+               ↓                       ↓                  ↓
+        data/backups/          s3://bucket/prefix/   Delete files > N days
+```
+
+**Example Schedule (24-hour interval):**
+```
+T=0h:   Backup #1 → data/backups/backup-2025-03-01-00-00.db → S3
+T=24h:  Backup #2 → data/backups/backup-2025-03-02-00-00.db → S3
+T=48h:  Backup #3 → data/backups/backup-2025-03-03-00-00.db → S3
+...
+T=168h: Cleanup: Delete backups older than 7 days
+```
+
+## Manual Backups
+
+### Trigger S3 Backup
+
+```bash
+curl -X POST "http://localhost:3001/api/backups/s3?db=production" \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "key": "production/backup-2025-03-01T14-32-11-482Z.db",
+  "size": 214748364800,
+  "duration": 92384
+}
+```
+
+### List Backups
+
+```bash
+curl "http://localhost:3001/api/backups?db=production" \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "local": [
+    {
+      "filename": "backup-2025-03-01-12-00.db",
+      "size": 214748364800,
+      "createdAt": "2025-03-01T12:00:00.000Z"
+    }
+  ],
+  "s3": [
+    {
+      "key": "production/backup-2025-03-01T12-00-00-000Z.db",
+      "size": 214748364800,
+      "lastModified": "2025-03-01T12:05:32.000Z"
+    },
+    {
+      "key": "production/backup-2025-02-28T12-00-00-000Z.db",
+      "size": 212342784000,
+      "lastModified": "2025-02-28T12:04:18.000Z"
+    }
+  ]
+}
+```
+
+## Restore from S3
+
+### Restore Specific Backup
+
+```bash
+curl -X POST "http://localhost:3001/api/backups/s3/restore?db=production" \
+  -H "Authorization: Bearer $DUCKLING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "key": "production/backup-2025-03-01T12-00-00-000Z.db"
+  }'
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "key": "production/backup-2025-03-01T12-00-00-000Z.db",
+  "size": 214748364800,
+  "duration": 87542
+}
+```
+
+**Restore Process:**
+1. **Stop Sync**: Halt all sync/CDC operations
+2. **Download**: Stream encrypted backup from S3 to temp file
+3. **Verify HMAC**: Check integrity (client-side encryption only)
+4. **Decrypt**: Stream-decrypt to final location (client-side encryption only)
+5. **Replace**: Atomic rename to replace primary DuckDB file
+6. **Restart Sync**: Resume sync/CDC operations
+
+<Warning>
+  **Disk Space**: Restore requires temporary disk space equal to backup size. For a 500 GB backup, ensure 500+ GB free space.
+</Warning>
+
+## Monitoring
+
+### Test S3 Connection
+
+```bash
+curl -X POST "http://localhost:3001/api/databases/production/s3/test" \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "S3 connection successful (HeadBucket)"
+}
+```
+
+**Error Response:**
+```json
+{
+  "success": false,
+  "error": "AccessDenied: Access Denied"
+}
+```
+
+### Backup Statistics
+
+Check automation service status:
+
+```bash
+curl "http://localhost:3001/api/automation/status?db=production" \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "backup": {
+    "enabled": true,
+    "intervalHours": 24,
+    "retentionDays": 7,
+    "lastBackupAt": "2025-03-01T12:00:00.000Z",
+    "s3Enabled": true,
+    "s3LastUploadAt": "2025-03-01T12:05:32.000Z"
+  }
+}
+```
+
+## Performance Characteristics
+
+### Upload Performance
+
+| Database Size | Upload Time (100 Mbps) | Upload Time (1 Gbps) | Memory Usage |
+|---------------|------------------------|----------------------|---------------|
+| 10 GB | ~15 minutes | ~2 minutes | ~50 MB |
+| 100 GB | ~2.5 hours | ~15 minutes | ~50 MB |
+| 200 GB | ~5 hours | ~30 minutes | ~50 MB |
+| 500 GB | ~12 hours | ~1.5 hours | ~50 MB |
+
+**Streaming Upload:** Memory usage is flat (~50 MB) regardless of database size due to streaming architecture.
+
+### Restore Performance
+
+| Database Size | Download Time (100 Mbps) | Decrypt Time (SSD) | Total Restore Time |
+|---------------|--------------------------|--------------------|--------------------||
+| 10 GB | ~15 minutes | ~30 seconds | ~16 minutes |
+| 100 GB | ~2.5 hours | ~5 minutes | ~2.6 hours |
+| 200 GB | ~5 hours | ~10 minutes | ~5.2 hours |
+| 500 GB | ~12 hours | ~25 minutes | ~12.5 hours |
+
+**Download + Decrypt:** Restore time = download time + decrypt time (decryption is fast compared to network transfer).
+
+## Troubleshooting
+
+### Upload Failures
+
+**Error: `Access Denied`**
+
+IAM policy missing permissions:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:ListBucket",
+        "s3:DeleteObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::my-duckling-backups",
+        "arn:aws:s3:::my-duckling-backups/*"
+      ]
+    }
+  ]
+}
+```
+
+**Error: `No Such Bucket`**
+
+Bucket doesn't exist or wrong region:
+
+```bash
+# Create bucket
+aws s3 mb s3://my-duckling-backups --region us-east-1
+```
+
+### Restore Failures
+
+**Error: `HMAC verification failed`**
+
+Backup corrupted or wrong encryption key:
+
+1. Verify encryption key matches key used during upload
+2. Re-upload backup (previous upload may have failed)
+3. Check network integrity (S3 transfer corruption)
+
+**Error: `No space left on device`**
+
+Insufficient disk space for restore:
+
+```bash
+# Free up space
+df -h
+rm -rf data/backups/*
+```
+
+## Code Reference
+
+Implementation: `packages/server/src/services/s3BackupService.ts`
+
+**Key Methods:**
+- `uploadBackup()` - Upload backup to S3 (line 86)
+- `downloadBackup()` - Restore from S3 (line 176)
+- `listBackups()` - List S3 backups (line 56)
+- `deleteBackup()` - Delete S3 backup (line 293)
+- `testConnection()` - Test S3 connectivity (line 51)
+- `uploadEncrypted()` - Client-side encryption upload (line 131)
+- `downloadAndDecrypt()` - Verify HMAC + decrypt (line 198)
+
+**Encryption Helpers:**
+- `parseEncryptionKey()` - Validate 64-char hex key (line 43)
+- `uploadPlain()` - Unencrypted or SSE upload (line 106)

@@ -1,0 +1,504 @@
+---
+title: 'Monitoring & Observability'
+description: 'Health checks, metrics, and observability for Duckling server operations'
+---
+
+## Overview
+
+Duckling provides comprehensive monitoring capabilities including health checks, system metrics, query metrics, and automated health monitoring with auto-restart.
+
+## Health Checks
+
+### Health Endpoint
+
+Basic health check for database connectivity:
+
+```bash
+curl http://localhost:3001/health?db=your-database-id \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+```
+
+**Response (Healthy):**
+```json
+{
+  "status": "healthy",
+  "timestamp": "2026-03-01T10:30:00.000Z",
+  "duckdb": "connected",
+  "mysql": "connected",
+  "uptime": 86400
+}
+```
+
+**Response (Unhealthy):**
+```json
+{
+  "status": "unhealthy",
+  "timestamp": "2026-03-01T10:30:00.000Z",
+  "duckdb": "connected",
+  "mysql": "error",
+  "error": "Connection timeout"
+}
+```
+
+### CLI Health Check
+
+```bash
+docker exec duckling-server node packages/server/dist/cli.js health
+```
+
+### Status Endpoint
+
+Detailed system status with table counts and metrics:
+
+```bash
+curl http://localhost:3001/status?db=your-database-id \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+```
+
+**Response:**
+```json
+{
+  "status": "healthy",
+  "timestamp": "2026-03-01T10:30:00.000Z",
+  "databases": {
+    "duckdb": "connected",
+    "mysql": "connected"
+  },
+  "tables": {
+    "total": 42,
+    "synced": 42
+  },
+  "sync": {
+    "lastSync": "2026-03-01T10:15:00.000Z",
+    "nextSync": "2026-03-01T10:30:00.000Z",
+    "mode": "incremental"
+  },
+  "automation": {
+    "sync": true,
+    "backup": true,
+    "cleanup": true,
+    "healthMonitoring": true
+  }
+}
+```
+
+## Automatic Health Monitoring
+
+### Auto-Restart Service
+
+Duckling includes automatic health monitoring and recovery:
+
+- **Health Check Interval**: Every 60 seconds
+- **Auto-Restart**: Enabled by default (`AUTO_RESTART=true`)
+- **Max Restart Attempts**: 3 attempts (`MAX_RESTART_ATTEMPTS=3`)
+- **Recovery Strategy**: Exponential backoff
+
+<Info>
+The auto-restart service monitors DuckDB and MySQL connections, automatically recovering from failures without manual intervention.
+</Info>
+
+### Health Monitoring Checks
+
+The system performs three health checks every 60 seconds:
+
+<Steps>
+  <Step title="DuckDB Health">
+    Executes `SELECT 1` to verify DuckDB connectivity
+  </Step>
+  
+  <Step title="MySQL Health">
+    Tests MySQL connection pool
+  </Step>
+  
+  <Step title="Sync Health">
+    Verifies sync has run within last 30 minutes
+  </Step>
+</Steps>
+
+### Recovery Process
+
+When health check fails:
+
+1. **Attempt 1**: Test connections, trigger recovery sync
+2. **Wait**: Exponential backoff (2s, 4s, 8s, max 60s)
+3. **Attempt 2**: Retry connection tests and sync
+4. **Wait**: Longer backoff
+5. **Attempt 3**: Final retry attempt
+6. **Failure**: Log critical error, manual intervention required
+
+<Warning>
+After 3 failed recovery attempts, the service stops attempting automatic recovery. Check logs and investigate the root cause.
+</Warning>
+
+### Disabling Auto-Restart
+
+To disable automatic recovery:
+
+```bash
+AUTO_RESTART=false
+```
+
+## System Metrics
+
+### Metrics Endpoint
+
+Get comprehensive system and query metrics:
+
+```bash
+curl http://localhost:3001/metrics?db=your-database-id \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+```
+
+**Response:**
+```json
+{
+  "system": {
+    "current": {
+      "cpuPercent": 12.3,
+      "rssMB": 456.7,
+      "heapUsedMB": 234.5,
+      "hostFreeMemMB": 8192.0,
+      "hostTotalMemMB": 16384.0,
+      "eventLoopLagMs": 2
+    },
+    "history": [
+      {
+        "ts": "2026-03-01T10:29:30.000Z",
+        "cpuPercent": 11.8,
+        "rssMB": 453.2,
+        "eventLoopLagMs": 1
+      }
+    ]
+  },
+  "queries": {
+    "active": [
+      {
+        "id": "abc123",
+        "sql": "SELECT COUNT(*) FROM User WHERE createdAt > ?",
+        "startedAt": "2026-03-01T10:30:00.000Z",
+        "runningSec": 0.5,
+        "databaseId": "lms"
+      }
+    ],
+    "totalExecuted": 12543,
+    "patterns": [
+      {
+        "pattern": "SELECT COUNT(*) FROM User WHERE createdAt > ?",
+        "count": 234,
+        "avgMs": 45,
+        "minMs": 12,
+        "maxMs": 234,
+        "lastRun": "2026-03-01T10:30:00.000Z"
+      }
+    ]
+  }
+}
+```
+
+### System Metrics
+
+System metrics are collected every 30 seconds:
+
+| Metric | Description | Unit |
+|--------|-------------|------|
+| `cpuPercent` | Node.js process CPU usage | Percentage |
+| `rssMB` | Resident Set Size (total memory) | MB |
+| `heapUsedMB` | V8 heap memory usage | MB |
+| `hostFreeMemMB` | Available system memory | MB |
+| `hostTotalMemMB` | Total system memory | MB |
+| `eventLoopLagMs` | Event loop delay | Milliseconds |
+
+**Metric History:**
+- Retention: Last 61 samples (30.5 minutes)
+- Sample Interval: 30 seconds
+- Buffer: Rolling window, oldest samples dropped
+
+<Note>
+The system metrics service starts automatically with the server. Historical data is kept in-memory for lightweight monitoring.
+</Note>
+
+### Query Metrics
+
+Query metrics track all DuckDB queries:
+
+**Active Queries:**
+- Currently executing queries
+- SQL statement (truncated to 200 chars)
+- Start timestamp
+- Running duration
+- Database ID
+
+**Query Patterns:**
+- Normalized SQL (literals replaced with `?`)
+- Execution count
+- Average/min/max duration
+- Last execution timestamp
+- Top 100 patterns by frequency
+
+**Pattern Normalization:**
+```sql
+-- Original queries:
+SELECT * FROM User WHERE id = 123
+SELECT * FROM User WHERE id = 456
+
+-- Normalized pattern:
+SELECT * FROM User WHERE id = ?
+```
+
+<Info>
+Query patterns use LRU (Least Recently Used) eviction with a maximum of 1,000 patterns tracked. This prevents memory growth on databases with high query variety.
+</Info>
+
+## Automation Status
+
+### Automation Endpoint
+
+Get status of all automation services:
+
+```bash
+curl http://localhost:3001/api/automation/status?db=your-database-id \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+```
+
+**Response:**
+```json
+{
+  "isRunning": true,
+  "autoCleanup": {
+    "enabled": true,
+    "intervalHours": 24,
+    "retentionDays": 90
+  },
+  "autoBackup": {
+    "enabled": true,
+    "intervalHours": 24,
+    "retentionDays": 7
+  },
+  "s3Backup": {
+    "scheduled": true,
+    "intervalHours": 24,
+    "retentionDays": 30
+  },
+  "autoRestart": {
+    "enabled": true,
+    "restartAttempts": 0,
+    "maxAttempts": 3,
+    "lastSuccessfulSync": "2026-03-01T10:15:00.000Z"
+  },
+  "sync": {
+    "enabled": true,
+    "intervalMinutes": 15
+  }
+}
+```
+
+### Automation Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTO_START_SYNC` | `true` | Enable automatic sync |
+| `AUTO_CLEANUP` | `true` | Enable automatic cleanup |
+| `AUTO_BACKUP` | `true` | Enable automatic backups |
+| `AUTO_RESTART` | `true` | Enable health monitoring and auto-restart |
+| `MAX_RESTART_ATTEMPTS` | `3` | Maximum recovery attempts |
+
+## Log Monitoring
+
+### Server Logs
+
+View real-time server logs:
+
+```bash
+# All logs
+docker-compose logs -f duckdb-server
+
+# Filter for sync operations
+docker-compose logs -f duckdb-server | grep -i sync
+
+# Filter for errors
+docker-compose logs -f duckdb-server | grep -i error
+
+# Filter for health checks
+docker-compose logs -f duckdb-server | grep -i health
+```
+
+### Log Levels
+
+Configure log verbosity with `LOG_LEVEL`:
+
+```bash
+LOG_LEVEL=debug  # Verbose debugging
+LOG_LEVEL=info   # Standard operations (default)
+LOG_LEVEL=warn   # Warnings only
+LOG_LEVEL=error  # Errors only
+```
+
+### Structured Logging
+
+Duckling uses Winston for structured logging:
+
+```json
+{
+  "level": "info",
+  "message": "Incremental sync completed",
+  "timestamp": "2026-03-01T10:15:00.000Z",
+  "databaseId": "lms",
+  "tables": 42,
+  "records": 1523,
+  "duration": 2340
+}
+```
+
+## Alerting
+
+### Health Check Monitoring
+
+Integrate health checks with monitoring tools:
+
+**Prometheus:**
+```yaml
+scrape_configs:
+  - job_name: 'duckling'
+    metrics_path: '/health'
+    static_configs:
+      - targets: ['localhost:3001']
+```
+
+**Uptime Monitoring:**
+```bash
+# Configure external monitoring
+curl -f http://localhost:3001/health || exit 1
+```
+
+### Critical Alerts
+
+Monitor these conditions:
+
+1. **Health endpoint returns unhealthy** (5xx status)
+2. **Sync hasn't run in 30+ minutes** (check automation status)
+3. **Restart attempts >= 3** (check automation status)
+4. **Event loop lag > 100ms** (check system metrics)
+5. **Memory usage > 80%** (check system metrics)
+
+<Warning>
+Set up external monitoring for production deployments. The auto-restart service provides recovery but not alerting.
+</Warning>
+
+## Performance Metrics
+
+### Sync Performance
+
+Track sync operations from sync logs:
+
+```bash
+curl "http://localhost:3001/api/sync-logs?limit=100&db=your-database-id" \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+```
+
+**Key metrics:**
+- Records processed per sync
+- Duration per table
+- Success/error rate
+- Watermark progression
+
+### Query Performance
+
+Monitor slow queries from query patterns:
+
+```bash
+curl http://localhost:3001/metrics?db=your-database-id \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}" | \
+  jq '.queries.patterns | sort_by(.avgMs) | reverse | .[0:10]'
+```
+
+Identify queries with:
+- High average duration
+- High max duration
+- High execution count
+
+## Dashboard Integration
+
+### Web Dashboard
+
+Access the built-in dashboard:
+
+```
+http://localhost:3000
+```
+
+Features:
+- Real-time system metrics graphs
+- Active queries view
+- Query pattern analysis
+- Sync log history
+- Automation status
+
+### API Integration
+
+Build custom dashboards using API endpoints:
+
+```javascript
+// Fetch metrics every 10 seconds
+setInterval(async () => {
+  const response = await fetch(
+    'http://localhost:3001/metrics?db=lms',
+    {
+      headers: {
+        'Authorization': `Bearer ${API_KEY}`
+      }
+    }
+  );
+  const metrics = await response.json();
+  updateDashboard(metrics);
+}, 10000);
+```
+
+## Multi-Database Monitoring
+
+Monitor multiple databases:
+
+```bash
+# Get list of databases
+curl http://localhost:3001/api/databases \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+
+# Check health for each database
+for db in lms analytics common; do
+  echo "Database: $db"
+  curl "http://localhost:3001/health?db=$db" \
+    -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+done
+```
+
+<Info>
+Each database has independent health status, metrics, and automation services. Monitor them separately for accurate observability.
+</Info>
+
+## Troubleshooting
+
+### High CPU Usage
+
+1. Check active queries: `GET /metrics`
+2. Review query patterns for inefficient queries
+3. Reduce concurrent query load
+4. Consider query optimization
+
+### High Memory Usage
+
+1. Check system metrics: `GET /metrics`
+2. Review batch sizes: `BATCH_SIZE`, `INSERT_BATCH_SIZE`
+3. Reduce connection pool sizes
+4. Monitor for memory leaks in logs
+
+### Event Loop Lag
+
+1. Check system metrics for `eventLoopLagMs`
+2. Reduce concurrent operations
+3. Increase worker threads: `WORKER_THREADS`
+4. Review long-running queries
+
+## Next Steps
+
+- [Synchronization](/operations/synchronization) - Configure sync operations
+- [Backups](/operations/backups) - Set up backup automation
+- [Performance Tuning](/operations/performance-tuning) - Optimize performance

@@ -1,0 +1,530 @@
+---
+title: 'DucklingClient API'
+description: 'Complete API reference for the DucklingClient class'
+---
+
+# DucklingClient API Reference
+
+The `DucklingClient` class provides a high-performance WebSocket interface to DuckDB.
+
+## Constructor
+
+Create a new DucklingClient instance.
+
+```typescript
+const client = new DucklingClient(config: DuckDBSDKConfig);
+```
+
+<ParamField path="config" type="DuckDBSDKConfig" required>
+  Configuration object for the client. See [Installation](/sdk/installation#configuration-options) for all options.
+</ParamField>
+
+## Methods
+
+### connect()
+
+Manually connect to DuckDB server and authenticate with API key.
+
+<Note>
+  This method is **optional** when `autoConnect: true` (default). The client automatically connects on first query.
+</Note>
+
+```typescript
+await client.connect(): Promise<void>
+```
+
+**Example:**
+
+```typescript
+const client = new DucklingClient({
+  url: 'ws://localhost:3001/ws',
+  apiKey: process.env.DUCKLING_API_KEY!,
+  autoConnect: false  // Disable auto-connect
+});
+
+// Manually connect
+await client.connect();
+```
+
+**Throws:**
+- `Error` if connection fails
+- `Error` if authentication fails
+
+---
+
+### query()
+
+Execute SQL query and return typed results.
+
+```typescript
+await client.query<T = any>(sql: string, params?: any[]): Promise<T[]>
+```
+
+<ParamField path="sql" type="string" required>
+  SQL query to execute
+</ParamField>
+
+<ParamField path="params" type="any[]">
+  Optional query parameters for parameterized queries
+</ParamField>
+
+<ParamField path="T" type="type parameter">
+  TypeScript type for result rows (defaults to `any`)
+</ParamField>
+
+**Returns:** `Promise<T[]>` - Array of result rows
+
+**Examples:**
+
+<CodeGroup>
+
+```typescript Basic Query
+const users = await client.query('SELECT * FROM User LIMIT 10');
+console.log(users);
+```
+
+```typescript Typed Query
+interface User {
+  id: number;
+  name: string;
+  email: string;
+}
+
+const users = await client.query<User>('SELECT * FROM User LIMIT 10');
+// users is typed as User[]
+console.log(users[0].email);  // TypeScript knows this exists
+```
+
+```typescript Parameterized Query
+const users = await client.query<User>(
+  'SELECT * FROM User WHERE id = ?',
+  [123]
+);
+```
+
+```typescript Aggregate Query
+interface CountResult {
+  count: number;
+}
+
+const result = await client.query<CountResult>(
+  'SELECT COUNT(*) as count FROM User'
+);
+console.log(`Total users: ${result[0].count}`);
+```
+
+</CodeGroup>
+
+**Throws:**
+- `Error` if query execution fails
+- `Error` if not connected (when `autoConnect: false`)
+
+---
+
+### queryBatch()
+
+Execute multiple queries in parallel.
+
+```typescript
+await client.queryBatch<T = any>(queries: string[]): Promise<T[][]>
+```
+
+<ParamField path="queries" type="string[]" required>
+  Array of SQL queries to execute in parallel
+</ParamField>
+
+<ParamField path="T" type="type parameter">
+  TypeScript type for result rows
+</ParamField>
+
+**Returns:** `Promise<T[][]>` - Array of result arrays (one per query)
+
+**Example:**
+
+```typescript
+const results = await client.queryBatch([
+  'SELECT COUNT(*) as count FROM User',
+  'SELECT COUNT(*) as count FROM Product',
+  'SELECT COUNT(*) as count FROM Order'
+]);
+
+console.log('User count:', results[0][0].count);
+console.log('Product count:', results[1][0].count);
+console.log('Order count:', results[2][0].count);
+```
+
+<Info>
+  Batch queries execute 3-5x faster than sequential execution. See [Examples](/sdk/examples#parallel-queries) for benchmarks.
+</Info>
+
+---
+
+### queryPaginated()
+
+Execute paginated query with automatic LIMIT and OFFSET.
+
+```typescript
+await client.queryPaginated<T = QueryRow>(
+  sql: string,
+  options: PaginationOptions
+): Promise<PaginatedResult<T>>
+```
+
+<ParamField path="sql" type="string" required>
+  Base SQL query (without LIMIT/OFFSET)
+</ParamField>
+
+<ParamField path="options" type="PaginationOptions" required>
+  Pagination options with `limit` and `offset`
+</ParamField>
+
+**Returns:** `Promise<PaginatedResult<T>>` - Paginated result with metadata
+
+**Example:**
+
+```typescript
+const result = await client.queryPaginated<User>(
+  'SELECT * FROM User ORDER BY createdAt DESC',
+  { limit: 20, offset: 0 }
+);
+
+console.log(`Showing ${result.data.length} users`);
+console.log(`Has more: ${result.pagination.hasMore}`);
+console.log(`Offset: ${result.pagination.offset}`);
+console.log(`Limit: ${result.pagination.limit}`);
+```
+
+**PaginatedResult structure:**
+
+```typescript
+interface PaginatedResult<T> {
+  data: T[];                   // Result rows
+  pagination: {
+    offset: number;            // Current offset
+    limit: number;             // Requested limit
+    total?: number;            // Total rows (if available)
+    hasMore?: boolean;         // Whether more rows exist
+  };
+}
+```
+
+---
+
+### queryBatchDetailed()
+
+Execute batch queries with individual success/failure handling.
+
+```typescript
+await client.queryBatchDetailed<T = QueryRow>(
+  requests: BatchQueryRequest[]
+): Promise<BatchQueryResult<T>[]>
+```
+
+<ParamField path="requests" type="BatchQueryRequest[]" required>
+  Array of query requests with optional parameters
+</ParamField>
+
+**Returns:** `Promise<BatchQueryResult<T>[]>` - Array of results (success or error for each query)
+
+**Example:**
+
+```typescript
+const requests: BatchQueryRequest[] = [
+  { sql: 'SELECT * FROM User LIMIT 10' },
+  { sql: 'SELECT * FROM InvalidTable' },  // Will fail
+  { sql: 'SELECT * FROM Order LIMIT 10' }
+];
+
+const results = await client.queryBatchDetailed(requests);
+
+results.forEach((result, index) => {
+  if (result.success) {
+    console.log(`Query ${index + 1}: Success - ${result.data?.length} rows in ${result.duration}ms`);
+  } else {
+    console.error(`Query ${index + 1}: Failed - ${result.error}`);
+  }
+});
+```
+
+**BatchQueryResult structure:**
+
+```typescript
+interface BatchQueryResult<T> {
+  query: string;       // Original query
+  success: boolean;    // Query success status
+  data?: T[];          // Results (on success)
+  error?: string;      // Error message (on failure)
+  duration?: number;   // Execution time in ms
+}
+```
+
+---
+
+### ping()
+
+Test connection with ping.
+
+```typescript
+await client.ping(): Promise<boolean>
+```
+
+**Returns:** `Promise<boolean>` - `true` if connection is healthy, `false` otherwise
+
+**Example:**
+
+```typescript
+const isAlive = await client.ping();
+if (isAlive) {
+  console.log('✓ Connection healthy');
+} else {
+  console.log('✗ Connection unhealthy');
+}
+```
+
+<Note>
+  Auto-ping is enabled by default (`autoPing: true`). Manual ping is useful for health checks.
+</Note>
+
+---
+
+### close()
+
+Close WebSocket connection.
+
+```typescript
+client.close(): void
+```
+
+**Example:**
+
+```typescript
+try {
+  const users = await client.query('SELECT * FROM User');
+  console.log(users);
+} finally {
+  client.close();
+}
+```
+
+<Warning>
+  Always call `close()` when done to free resources. Use in `finally` blocks to ensure cleanup.
+</Warning>
+
+---
+
+### isConnected()
+
+Check if client is connected and authenticated.
+
+```typescript
+client.isConnected(): boolean
+```
+
+**Returns:** `boolean` - `true` if connected and authenticated
+
+**Example:**
+
+```typescript
+if (client.isConnected()) {
+  await client.query('SELECT * FROM User');
+} else {
+  console.log('Not connected');
+}
+```
+
+---
+
+### getStats()
+
+Get connection statistics.
+
+```typescript
+client.getStats(): ConnectionStats
+```
+
+**Returns:** `ConnectionStats` object with connection information
+
+**Example:**
+
+```typescript
+const stats = client.getStats();
+console.log(stats);
+// {
+//   connected: true,
+//   authenticated: true,
+//   pendingRequests: 2,
+//   reconnectAttempts: 0,
+//   url: 'ws://localhost:3001/ws'
+// }
+```
+
+**ConnectionStats structure:**
+
+```typescript
+interface ConnectionStats {
+  connected: boolean;          // Currently connected and authenticated
+  authenticated: boolean;      // Successfully authenticated
+  pendingRequests: number;     // Requests waiting for response
+  reconnectAttempts: number;   // Reconnection attempts made
+  url: string;                 // WebSocket server URL
+}
+```
+
+---
+
+## Event Handling
+
+The client extends `EventEmitter` and provides strongly-typed events.
+
+### on()
+
+Listen to events.
+
+```typescript
+client.on(event: string, listener: Function): this
+```
+
+**Available Events:**
+
+<ParamField path="connected" type="() => void">
+  Emitted when successfully connected to server
+</ParamField>
+
+<ParamField path="disconnected" type="() => void">
+  Emitted when disconnected from server
+</ParamField>
+
+<ParamField path="error" type="(error: Error) => void">
+  Emitted when an error occurs
+</ParamField>
+
+<ParamField path="reconnecting" type="(attempt: number) => void">
+  Emitted when reconnection attempt starts
+</ParamField>
+
+<ParamField path="message" type="(response: QueryResponse) => void">
+  Emitted when a message is received
+</ParamField>
+
+**Example:**
+
+```typescript
+client.on('connected', () => {
+  console.log('Connected to DuckDB server');
+});
+
+client.on('disconnected', () => {
+  console.log('Disconnected from server');
+});
+
+client.on('error', (error: Error) => {
+  console.error('WebSocket error:', error.message);
+});
+
+client.on('reconnecting', (attempt: number) => {
+  console.log(`Reconnection attempt ${attempt}`);
+});
+```
+
+---
+
+## Error Handling
+
+Handle query errors with try-catch:
+
+```typescript
+try {
+  const result = await client.query('SELECT * FROM NonExistentTable');
+} catch (error) {
+  if (error instanceof Error) {
+    console.error('Query failed:', error.message);
+  }
+}
+```
+
+**Common Error Types:**
+
+- **Connection errors**: Server unreachable, authentication failed
+- **Query errors**: Invalid SQL, table not found, syntax errors
+- **Timeout errors**: Query exceeded timeout (30 seconds)
+
+---
+
+## Performance Tips
+
+<AccordionGroup>
+  <Accordion title="Use Batch Queries for Multiple Queries">
+    Execute multiple queries in parallel with `queryBatch()` for 3-5x speedup:
+    
+    ```typescript
+    // ✓ Good - parallel execution
+    const results = await client.queryBatch([
+      'SELECT COUNT(*) FROM User',
+      'SELECT COUNT(*) FROM Product',
+      'SELECT COUNT(*) FROM Order'
+    ]);
+    
+    // ✗ Bad - sequential execution
+    const users = await client.query('SELECT COUNT(*) FROM User');
+    const products = await client.query('SELECT COUNT(*) FROM Product');
+    const orders = await client.query('SELECT COUNT(*) FROM Order');
+    ```
+  </Accordion>
+
+  <Accordion title="Use Connection Pooling for High Concurrency">
+    Create multiple clients for 10,000+ queries/second:
+    
+    ```typescript
+    const pool = Array.from({ length: 5 }, () => new DucklingClient(config));
+    
+    // Round-robin query distribution
+    let currentIndex = 0;
+    function query(sql: string) {
+      const client = pool[currentIndex];
+      currentIndex = (currentIndex + 1) % pool.length;
+      return client.query(sql);
+    }
+    ```
+    
+    See [Connection Pool Example](/sdk/examples#connection-pool) for full implementation.
+  </Accordion>
+
+  <Accordion title="Enable Auto-Ping for Long-Lived Connections">
+    Auto-ping keeps connections alive automatically (enabled by default):
+    
+    ```typescript
+    const client = new DucklingClient({
+      url: 'ws://localhost:3001/ws',
+      apiKey: process.env.DUCKLING_API_KEY!,
+      autoPing: true,       // Default: true
+      pingInterval: 30000   // Default: 30 seconds
+    });
+    ```
+  </Accordion>
+
+  <Accordion title="Use TypeScript Types for Type Safety">
+    Define schema types for full IntelliSense and compile-time checks:
+    
+    ```typescript
+    interface User {
+      id: number;
+      name: string;
+      email: string;
+    }
+    
+    const users = await client.query<User>('SELECT * FROM User');
+    // TypeScript knows: users[0].email exists
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="TypeScript Types" icon="file-code" href="/sdk/types">
+    Learn about type definitions
+  </Card>
+  <Card title="Examples" icon="lightbulb" href="/sdk/examples">
+    See real-world usage examples
+  </Card>
+</CardGroup>

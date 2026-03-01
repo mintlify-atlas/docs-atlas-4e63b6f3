@@ -1,0 +1,285 @@
+---
+title: 'Installation'
+description: 'Install and configure the DuckDB WebSocket SDK'
+---
+
+# Installation
+
+Install the DuckDB WebSocket SDK in your TypeScript or JavaScript project.
+
+## Package Installation
+
+<CodeGroup>
+
+```bash npm
+npm install @chittihq/duckling
+```
+
+```bash pnpm
+pnpm add @chittihq/duckling
+```
+
+```bash yarn
+yarn add @chittihq/duckling
+```
+
+</CodeGroup>
+
+## Requirements
+
+- **Node.js**: 18.0.0 or higher
+- **TypeScript**: 5.0.0 or higher (optional, for type support)
+- **DuckDB Server**: WebSocket-enabled DuckDB server instance
+- **API Key**: Valid `DUCKLING_API_KEY` for authentication
+
+## Environment Setup
+
+Create a `.env` file in your project root:
+
+```bash .env
+DUCKLING_API_KEY=your-api-key-here
+DUCKLING_WS_URL=ws://localhost:3001/ws  # Optional, defaults to this
+```
+
+## Basic Configuration
+
+```typescript
+import { DucklingClient } from '@chittihq/duckling';
+
+const client = new DucklingClient({
+  url: process.env.DUCKLING_WS_URL || 'ws://localhost:3001/ws',
+  apiKey: process.env.DUCKLING_API_KEY!,
+  databaseName: 'default'  // Optional - defaults to 'default'
+});
+```
+
+## Configuration Options
+
+All configuration options with their defaults:
+
+<ParamField path="url" type="string" required>
+  WebSocket server URL (e.g., `ws://localhost:3001/ws`)
+</ParamField>
+
+<ParamField path="apiKey" type="string" required>
+  API key for authentication
+</ParamField>
+
+<ParamField path="databaseName" type="string" default="default">
+  Database name to connect to
+</ParamField>
+
+<ParamField path="autoConnect" type="boolean" default="true">
+  Automatically connect on first query (no manual `connect()` needed)
+</ParamField>
+
+<ParamField path="autoPing" type="boolean" default="true">
+  Automatically ping server to keep connection alive
+</ParamField>
+
+<ParamField path="pingInterval" type="number" default="30000">
+  Ping interval in milliseconds (default: 30 seconds)
+</ParamField>
+
+<ParamField path="autoReconnect" type="boolean" default="true">
+  Automatically reconnect on connection failure
+</ParamField>
+
+<ParamField path="maxReconnectAttempts" type="number" default="5">
+  Maximum number of reconnection attempts
+</ParamField>
+
+<ParamField path="reconnectDelay" type="number" default="1000">
+  Initial reconnect delay in milliseconds (uses exponential backoff)
+</ParamField>
+
+<ParamField path="connectionTimeout" type="number" default="5000">
+  Connection timeout in milliseconds
+</ParamField>
+
+<ParamField path="enableLogging" type="boolean" default="false">
+  Enable logging of queries and results
+</ParamField>
+
+<ParamField path="logLevel" type="'error' | 'warn' | 'info' | 'debug'" default="'info'">
+  Log level for debugging
+</ParamField>
+
+## Advanced Configuration
+
+### Custom Connection Settings
+
+```typescript
+const client = new DucklingClient({
+  url: 'wss://production.example.com/ws',
+  apiKey: process.env.DUCKLING_API_KEY!,
+  databaseName: 'production',
+  
+  // Connection behavior
+  autoConnect: true,
+  autoReconnect: true,
+  maxReconnectAttempts: 10,
+  reconnectDelay: 2000,
+  connectionTimeout: 10000,
+  
+  // Keep-alive settings
+  autoPing: true,
+  pingInterval: 60000,  // Ping every 60 seconds
+  
+  // Debugging
+  enableLogging: true,
+  logLevel: 'debug'
+});
+```
+
+### Production Configuration
+
+```typescript
+const client = new DucklingClient({
+  url: process.env.DUCKLING_WS_URL!,
+  apiKey: process.env.DUCKLING_API_KEY!,
+  databaseName: process.env.DATABASE_NAME || 'default',
+  
+  // Aggressive reconnection for production
+  autoReconnect: true,
+  maxReconnectAttempts: 10,
+  reconnectDelay: 1000,
+  
+  // Long-lived connections
+  autoPing: true,
+  pingInterval: 30000,
+  
+  // Error logging only
+  enableLogging: true,
+  logLevel: 'error'
+});
+```
+
+### Development Configuration
+
+```typescript
+const client = new DucklingClient({
+  url: 'ws://localhost:3001/ws',
+  apiKey: process.env.DUCKLING_API_KEY!,
+  databaseName: 'development',
+  
+  // Verbose logging for debugging
+  enableLogging: true,
+  logLevel: 'debug',
+  
+  // Quick ping for testing
+  pingInterval: 5000
+});
+```
+
+## TypeScript Configuration
+
+Add type definitions to your `tsconfig.json`:
+
+```json tsconfig.json
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "node",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true
+  }
+}
+```
+
+## Verify Installation
+
+Test your installation with a simple query:
+
+```typescript test.ts
+import { DucklingClient } from '@chittihq/duckling';
+
+const client = new DucklingClient({
+  url: 'ws://localhost:3001/ws',
+  apiKey: process.env.DUCKLING_API_KEY!,
+  enableLogging: true
+});
+
+async function test() {
+  try {
+    // Auto-connects on first query
+    const result = await client.query('SELECT 1 as test');
+    console.log('✓ Connection successful:', result);
+  } catch (error) {
+    console.error('✗ Connection failed:', error);
+  } finally {
+    client.close();
+  }
+}
+
+test();
+```
+
+Run the test:
+
+```bash
+DUCKLING_API_KEY=your-key npx tsx test.ts
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Connection Timeout">
+    Increase `connectionTimeout` if connecting to a remote server:
+    
+    ```typescript
+    const client = new DucklingClient({
+      url: 'wss://remote.example.com/ws',
+      apiKey: process.env.DUCKLING_API_KEY!,
+      connectionTimeout: 10000  // 10 seconds
+    });
+    ```
+  </Accordion>
+
+  <Accordion title="Authentication Failed">
+    Verify your API key is correct:
+    
+    ```bash
+    echo $DUCKLING_API_KEY
+    ```
+    
+    Make sure it matches the key configured on the server.
+  </Accordion>
+
+  <Accordion title="WebSocket Connection Refused">
+    Check that the DuckDB server is running:
+    
+    ```bash
+    curl http://localhost:3001/health
+    ```
+    
+    Verify the WebSocket URL uses `ws://` (not `http://`).
+  </Accordion>
+
+  <Accordion title="Module Not Found">
+    Reinstall dependencies:
+    
+    ```bash
+    rm -rf node_modules package-lock.json
+    npm install
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Client API" icon="code" href="/sdk/client">
+    Learn about DucklingClient methods
+  </Card>
+  <Card title="TypeScript Types" icon="file-code" href="/sdk/types">
+    Explore type definitions
+  </Card>
+  <Card title="Examples" icon="lightbulb" href="/sdk/examples">
+    See usage examples
+  </Card>
+</CardGroup>

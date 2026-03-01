@@ -1,80 +1,203 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quick Start
+description: Get Duckling running in minutes with Docker and start replicating your MySQL data to DuckDB.
 ---
 
-## Get started in three steps
+# Quick Start
 
-Get your documentation site running locally and make your first customization.
+Get Duckling running with Docker in under 5 minutes.
 
-### Step 1: Set up your local environment
+## Prerequisites
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+- Docker and Docker Compose installed
+- pnpm package manager
+- MySQL database to replicate from
 
-### Step 2: Deploy your changes
+## Step-by-Step Setup
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+<Steps>
+  <Step title="Clone and Build">
+    Clone the repository and build the project:
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    ```bash
+    git clone <repository>
+    cd duckling
+    pnpm install && pnpm run build
+    ```
+  </Step>
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+  <Step title="Configure Environment">
+    Copy the example environment file and configure your settings:
 
-### Step 3: Go live
+    ```bash
+    cp .env.example .env
+    ```
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    Edit `.env` and set the required values:
 
-## Next steps
+    ```bash
+    # Required: MySQL connection string
+    MYSQL_CONNECTION_STRING=mysql://user:password@localhost:3306/database
 
-Now that you have your docs running, explore these key features:
+    # Required: Security keys (generate with: openssl rand -hex 32)
+    ADMIN_USERNAME=admin
+    ADMIN_PASSWORD=your-secure-password
+    DUCKLING_API_KEY=your-secure-api-key
+    SESSION_SECRET=generate-with-openssl-rand-hex-32
+
+    # Database path
+    DUCKDB_PATH=data/duckling.db
+
+    # Sync configuration
+    SYNC_INTERVAL_MINUTES=15
+    BATCH_SIZE=10000
+    ENABLE_INCREMENTAL_SYNC=true
+    AUTO_START_SYNC=false
+    ```
+
+    <Warning>
+      Replace default passwords and API keys with secure values before deploying to production!
+    </Warning>
+  </Step>
+
+  <Step title="Start Services">
+    Start the DuckDB server and frontend with Docker Compose:
+
+    ```bash
+    docker-compose up -d
+    ```
+
+    This starts two services:
+    - **Server**: `http://localhost:3001` (backend API)
+    - **Frontend**: `http://localhost:3000` (Nuxt 4 dashboard)
+    - **MySQL Protocol**: `localhost:3307` (MySQL wire protocol)
+  </Step>
+
+  <Step title="Verify Installation">
+    Check that both services are running:
+
+    <CodeGroup>
+      ```bash Server Health
+      curl http://localhost:3001/health
+      ```
+
+      ```bash Frontend
+      curl http://localhost:3000
+      ```
+
+      ```bash MySQL Protocol
+      mysql -h 127.0.0.1 -P 3307 -u duckling -p
+      ```
+    </CodeGroup>
+  </Step>
+
+  <Step title="Trigger Initial Sync">
+    Open the dashboard at `http://localhost:3000` and trigger your first full sync, or use the API:
+
+    ```bash
+    curl -X POST http://localhost:3001/api/sync/full \
+      -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+    ```
+
+    <Note>
+      The first sync may take some time depending on your database size. Monitor progress in the dashboard at `http://localhost:3000/logs`.
+    </Note>
+  </Step>
+
+  <Step title="Query Your Data">
+    Once sync completes, query your replicated data:
+
+    <CodeGroup>
+      ```bash REST API
+      curl -X POST http://localhost:3001/api/query \
+        -H "Authorization: Bearer ${DUCKLING_API_KEY}" \
+        -H "Content-Type: application/json" \
+        -d '{"sql": "SELECT COUNT(*) FROM users"}'
+      ```
+
+      ```bash MySQL Client
+      mysql -h 127.0.0.1 -P 3307 -u duckling -p
+      # Then run SQL queries:
+      SELECT COUNT(*) FROM users;
+      ```
+
+      ```bash Dashboard
+      # Open http://localhost:3000
+      # Navigate to Tables or Query page
+      ```
+    </CodeGroup>
+  </Step>
+</Steps>
+
+## What's Next?
+
+Your Duckling server is now running with:
+
+- Automatic incremental sync every 15 minutes (if `AUTO_START_SYNC=true`)
+- REST API endpoints for querying
+- MySQL wire protocol on port 3307
+- Web dashboard for monitoring and queries
 
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Configuration" icon="gear" href="/configuration">
+    Learn about all configuration options and tuning parameters
+  </Card>
+  <Card title="API Reference" icon="code" href="/api">
+    Explore REST endpoints and WebSocket SDK
+  </Card>
+  <Card title="Deployment" icon="server" href="/deployment">
+    Production deployment, security, and backups
+  </Card>
+  <Card title="Type Support" icon="database" href="/types">
+    MySQL to DuckDB type mapping and limitations
+  </Card>
 </CardGroup>
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+## Docker Services
+
+The `docker-compose.yml` defines two services:
+
+### DuckDB Server
+
+- Container: `duckling-server`
+- Ports: `3001:3000` (HTTP), `3307:3307` (MySQL protocol)
+- Volumes: `./data:/app/data`, `./logs:/app/logs`
+- Hot reload enabled for development
+
+### DuckDB Frontend
+
+- Container: `duckling-frontend`
+- Port: `3000:3000`
+- Depends on: `duckdb-server`
+- Hot reload enabled for development
+
+## Troubleshooting
+
+### Connection Issues
+
+If you can't connect to MySQL:
+
+1. Verify your `MYSQL_CONNECTION_STRING` is correct
+2. Check MySQL host is reachable from Docker container
+3. Ensure MySQL user has SELECT permissions on target database
+
+### Sync Errors
+
+Check logs for detailed error messages:
+
+```bash
+# Server logs
+docker-compose logs -f duckdb-server
+
+# Or view in dashboard
+http://localhost:3000/logs
+```
+
+### Port Conflicts
+
+If ports 3000, 3001, or 3307 are already in use, edit `docker-compose.yml`:
+
+```yaml
+ports:
+  - "3002:3000"  # Change 3001 to 3002
+```

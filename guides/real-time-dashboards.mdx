@@ -1,0 +1,662 @@
+---
+title: 'Building Real-Time Dashboards'
+description: 'Create high-performance real-time dashboards using Duckling WebSocket SDK'
+icon: 'chart-line'
+---
+
+## Overview
+
+Duckling's WebSocket SDK delivers 5-15ms query latency, making it ideal for real-time dashboards that update every second without lag. This guide shows you how to build responsive, live dashboards with automatic data refresh.
+
+## Why WebSocket for Dashboards?
+
+| Method | Latency | Throughput | Use Case |
+|--------|---------|------------|----------|
+| HTTP REST API | 50-100ms | ~1,000 queries/sec | Standard dashboards |
+| WebSocket SDK | 5-15ms | 10,000+ queries/sec | Real-time dashboards |
+
+**Benefits:**
+- **10x faster queries** - Sub-second dashboard updates
+- **Persistent connection** - No connection overhead per query
+- **Parallel queries** - Load all metrics simultaneously
+- **Auto-reconnect** - Resilient to network interruptions
+
+## Quick Start
+
+<Steps>
+  <Step title="Install dependencies">
+    ```bash
+    npm install @chittihq/duckling
+    # or
+    pnpm add @chittihq/duckling
+    ```
+  </Step>
+
+  <Step title="Initialize WebSocket client">
+    ```typescript
+    import { DucklingClient } from '@chittihq/duckling';
+
+    const client = new DucklingClient({
+      url: 'ws://localhost:3001/ws',
+      apiKey: process.env.DUCKLING_API_KEY,
+      autoReconnect: true,
+      autoPing: true  // Keeps connection alive
+    });
+    ```
+  </Step>
+
+  <Step title="Set up automatic refresh">
+    ```typescript
+    // Update dashboard every second
+    setInterval(async () => {
+      const stats = await client.query('SELECT * FROM dashboard_stats');
+      updateDashboard(stats);
+    }, 1000);
+    ```
+  </Step>
+</Steps>
+
+## Dashboard Patterns
+
+### Pattern 1: Single Metrics Dashboard
+
+Display key metrics updated every second:
+
+```typescript
+import { DucklingClient } from '@chittihq/duckling';
+
+interface DashboardMetrics {
+  totalUsers: number;
+  totalOrders: number;
+  totalRevenue: number;
+  avgOrderValue: number;
+  ordersToday: number;
+  revenueToday: number;
+}
+
+class DashboardService {
+  private client: DucklingClient;
+  private refreshInterval?: NodeJS.Timeout;
+
+  constructor() {
+    this.client = new DucklingClient({
+      url: process.env.DUCKLING_WS_URL || 'ws://localhost:3001/ws',
+      apiKey: process.env.DUCKLING_API_KEY!,
+      autoReconnect: true,
+      autoPing: true
+    });
+
+    // Event handlers
+    this.client.on('connected', () => {
+      console.log('Dashboard connected to DuckDB');
+    });
+
+    this.client.on('disconnected', () => {
+      console.log('Dashboard disconnected, auto-reconnecting...');
+    });
+  }
+
+  async getMetrics(): Promise<DashboardMetrics> {
+    // Execute all metrics queries in parallel
+    const queries = [
+      'SELECT COUNT(*) as count FROM User',
+      'SELECT COUNT(*) as count FROM `Order`',
+      'SELECT COALESCE(SUM(total), 0) as sum FROM `Order`',
+      'SELECT COALESCE(AVG(total), 0) as avg FROM `Order`',
+      `SELECT COUNT(*) as count FROM \`Order\`
+       WHERE DATE(createdAt) = CURRENT_DATE`,
+      `SELECT COALESCE(SUM(total), 0) as sum FROM \`Order\`
+       WHERE DATE(createdAt) = CURRENT_DATE`
+    ];
+
+    const startTime = Date.now();
+    const results = await this.client.queryBatch(queries);
+    const duration = Date.now() - startTime;
+
+    console.log(`Dashboard metrics loaded in ${duration}ms`);
+
+    return {
+      totalUsers: (results[0][0] as any).count,
+      totalOrders: (results[1][0] as any).count,
+      totalRevenue: (results[2][0] as any).sum,
+      avgOrderValue: (results[3][0] as any).avg,
+      ordersToday: (results[4][0] as any).count,
+      revenueToday: (results[5][0] as any).sum
+    };
+  }
+
+  startAutoRefresh(callback: (metrics: DashboardMetrics) => void, intervalMs = 1000) {
+    this.refreshInterval = setInterval(async () => {
+      try {
+        const metrics = await this.getMetrics();
+        callback(metrics);
+      } catch (error) {
+        console.error('Failed to refresh dashboard:', error);
+      }
+    }, intervalMs);
+
+    console.log(`Auto-refresh started (${intervalMs}ms)`);
+  }
+
+  stopAutoRefresh() {
+    if (this.refreshInterval) {
+      clearInterval(this.refreshInterval);
+      console.log('Auto-refresh stopped');
+    }
+  }
+
+  close() {
+    this.stopAutoRefresh();
+    this.client.close();
+  }
+}
+
+export default DashboardService;
+```
+
+### Pattern 2: Time-Series Charts
+
+Real-time charts with rolling time windows:
+
+<CodeGroup>
+```typescript Revenue Chart
+interface RevenueDataPoint {
+  date: string;
+  revenue: number;
+  orderCount: number;
+}
+
+async function getRevenueTimeSeries(
+  client: DucklingClient,
+  days: number = 30
+): Promise<RevenueDataPoint[]> {
+  const data = await client.query<RevenueDataPoint>(`
+    SELECT
+      DATE_TRUNC('day', createdAt) as date,
+      SUM(total) as revenue,
+      COUNT(*) as orderCount
+    FROM \`Order\`
+    WHERE createdAt >= CURRENT_DATE - INTERVAL '${days} days'
+    GROUP BY date
+    ORDER BY date
+  `);
+
+  return data;
+}
+
+// Update chart every 5 seconds
+setInterval(async () => {
+  const data = await getRevenueTimeSeries(client, 30);
+  updateRevenueChart(data);
+}, 5000);
+```
+
+```typescript User Signups Chart
+interface SignupDataPoint {
+  hour: string;
+  signups: number;
+}
+
+async function getSignupsToday(
+  client: DucklingClient
+): Promise<SignupDataPoint[]> {
+  const data = await client.query<SignupDataPoint>(`
+    SELECT
+      DATE_TRUNC('hour', createdAt) as hour,
+      COUNT(*) as signups
+    FROM User
+    WHERE DATE(createdAt) = CURRENT_DATE
+    GROUP BY hour
+    ORDER BY hour
+  `);
+
+  return data;
+}
+
+// Update every second for real-time signups
+setInterval(async () => {
+  const data = await getSignupsToday(client);
+  updateSignupChart(data);
+}, 1000);
+```
+
+```typescript Activity Heatmap
+interface ActivityDataPoint {
+  hour: number;
+  dayOfWeek: number;
+  activityCount: number;
+}
+
+async function getActivityHeatmap(
+  client: DucklingClient
+): Promise<ActivityDataPoint[]> {
+  const data = await client.query<ActivityDataPoint>(`
+    SELECT
+      EXTRACT(HOUR FROM createdAt) as hour,
+      EXTRACT(DOW FROM createdAt) as dayOfWeek,
+      COUNT(*) as activityCount
+    FROM ActivityLog
+    WHERE createdAt >= CURRENT_DATE - INTERVAL '7 days'
+    GROUP BY hour, dayOfWeek
+    ORDER BY dayOfWeek, hour
+  `);
+
+  return data;
+}
+```
+</CodeGroup>
+
+### Pattern 3: Leaderboards
+
+Real-time rankings updated every second:
+
+```typescript
+interface TopCustomer {
+  userId: number;
+  name: string;
+  email: string;
+  totalOrders: number;
+  totalRevenue: number;
+  rank: number;
+}
+
+async function getTopCustomers(
+  client: DucklingClient,
+  limit: number = 10
+): Promise<TopCustomer[]> {
+  const customers = await client.query<TopCustomer>(`
+    SELECT
+      u.id as userId,
+      u.name,
+      u.email,
+      COUNT(o.id) as totalOrders,
+      SUM(o.total) as totalRevenue,
+      ROW_NUMBER() OVER (ORDER BY SUM(o.total) DESC) as rank
+    FROM User u
+    JOIN \`Order\` o ON u.id = o.userId
+    GROUP BY u.id, u.name, u.email
+    ORDER BY totalRevenue DESC
+    LIMIT ${limit}
+  `);
+
+  return customers;
+}
+
+// Real-time leaderboard
+class LeaderboardDashboard {
+  private client: DucklingClient;
+  private updateInterval: NodeJS.Timeout | null = null;
+
+  constructor(client: DucklingClient) {
+    this.client = client;
+  }
+
+  start(callback: (data: TopCustomer[]) => void) {
+    this.updateInterval = setInterval(async () => {
+      try {
+        const topCustomers = await getTopCustomers(this.client, 10);
+        callback(topCustomers);
+      } catch (error) {
+        console.error('Leaderboard update failed:', error);
+      }
+    }, 1000);
+  }
+
+  stop() {
+    if (this.updateInterval) {
+      clearInterval(this.updateInterval);
+    }
+  }
+}
+```
+
+## React Dashboard Example
+
+### Custom Hook for Real-Time Data
+
+```typescript
+import { useState, useEffect } from 'react';
+import { DucklingClient } from '@chittihq/duckling';
+
+interface UseRealtimeQueryOptions<T> {
+  query: string;
+  refreshInterval?: number;
+  enabled?: boolean;
+}
+
+export function useRealtimeQuery<T>(
+  client: DucklingClient,
+  options: UseRealtimeQueryOptions<T>
+) {
+  const [data, setData] = useState<T[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+  const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
+
+  const {
+    query,
+    refreshInterval = 1000,
+    enabled = true
+  } = options;
+
+  useEffect(() => {
+    if (!enabled) return;
+
+    let interval: NodeJS.Timeout;
+
+    const fetchData = async () => {
+      try {
+        const result = await client.query<T>(query);
+        setData(result);
+        setError(null);
+        setLastUpdate(new Date());
+      } catch (err) {
+        setError(err as Error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    // Initial fetch
+    fetchData();
+
+    // Set up refresh interval
+    interval = setInterval(fetchData, refreshInterval);
+
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [client, query, refreshInterval, enabled]);
+
+  return { data, loading, error, lastUpdate };
+}
+```
+
+### Dashboard Component
+
+```tsx
+import React, { useMemo } from 'react';
+import { DucklingClient } from '@chittihq/duckling';
+import { useRealtimeQuery } from './hooks/useRealtimeQuery';
+
+const client = new DucklingClient({
+  url: 'ws://localhost:3001/ws',
+  apiKey: process.env.REACT_APP_DUCKLING_API_KEY!,
+  autoReconnect: true
+});
+
+interface DashboardStats {
+  totalUsers: number;
+  totalOrders: number;
+  totalRevenue: number;
+}
+
+export function DashboardPage() {
+  // Parallel queries for different metrics
+  const { data: userCount } = useRealtimeQuery<{ count: number }>(
+    client,
+    { query: 'SELECT COUNT(*) as count FROM User' }
+  );
+
+  const { data: orderCount } = useRealtimeQuery<{ count: number }>(
+    client,
+    { query: 'SELECT COUNT(*) as count FROM `Order`' }
+  );
+
+  const { data: revenue } = useRealtimeQuery<{ sum: number }>(
+    client,
+    { query: 'SELECT SUM(total) as sum FROM `Order`' }
+  );
+
+  const stats = useMemo<DashboardStats>(() => ({
+    totalUsers: userCount[0]?.count || 0,
+    totalOrders: orderCount[0]?.count || 0,
+    totalRevenue: revenue[0]?.sum || 0
+  }), [userCount, orderCount, revenue]);
+
+  return (
+    <div className="dashboard">
+      <h1>Real-Time Dashboard</h1>
+
+      <div className="metrics-grid">
+        <MetricCard
+          title="Total Users"
+          value={stats.totalUsers.toLocaleString()}
+          icon="👥"
+        />
+        <MetricCard
+          title="Total Orders"
+          value={stats.totalOrders.toLocaleString()}
+          icon="📦"
+        />
+        <MetricCard
+          title="Total Revenue"
+          value={`$${stats.totalRevenue.toLocaleString()}`}
+          icon="💰"
+        />
+      </div>
+    </div>
+  );
+}
+
+function MetricCard({ title, value, icon }: {
+  title: string;
+  value: string;
+  icon: string;
+}) {
+  return (
+    <div className="metric-card">
+      <div className="metric-icon">{icon}</div>
+      <div className="metric-title">{title}</div>
+      <div className="metric-value">{value}</div>
+    </div>
+  );
+}
+```
+
+## Performance Optimization
+
+### Batch Multiple Dashboard Queries
+
+<Note>
+Instead of making 6 separate queries, batch them into one request for 3-5x faster load times.
+</Note>
+
+```typescript
+// ❌ Bad: Sequential queries (slow)
+async function getDashboardMetricsSlow() {
+  const users = await client.query('SELECT COUNT(*) FROM User');
+  const orders = await client.query('SELECT COUNT(*) FROM `Order`');
+  const revenue = await client.query('SELECT SUM(total) FROM `Order`');
+  // Takes 60-90ms total
+}
+
+// ✅ Good: Parallel queries (fast)
+async function getDashboardMetricsFast() {
+  const results = await client.queryBatch([
+    'SELECT COUNT(*) FROM User',
+    'SELECT COUNT(*) FROM `Order`',
+    'SELECT SUM(total) FROM `Order`'
+  ]);
+  // Takes 15-20ms total (3-5x faster)
+}
+```
+
+### Smart Refresh Intervals
+
+Adjust refresh rate based on data volatility:
+
+```typescript
+const refreshIntervals = {
+  critical: 1000,      // Real-time metrics (1s)
+  important: 5000,     // Key metrics (5s)
+  standard: 15000,     // Regular metrics (15s)
+  background: 60000    // Background data (1min)
+};
+
+// Critical: Live order count
+useRealtimeQuery(client, {
+  query: 'SELECT COUNT(*) FROM `Order` WHERE DATE(createdAt) = CURRENT_DATE',
+  refreshInterval: refreshIntervals.critical
+});
+
+// Standard: Total users
+useRealtimeQuery(client, {
+  query: 'SELECT COUNT(*) FROM User',
+  refreshInterval: refreshIntervals.standard
+});
+```
+
+### Connection Pooling for Multiple Dashboards
+
+If you have multiple dashboard instances, use a connection pool:
+
+```typescript
+import { DucklingClient } from '@chittihq/duckling';
+
+class DashboardConnectionPool {
+  private static instance: DashboardConnectionPool;
+  private clients: DucklingClient[] = [];
+  private currentIndex = 0;
+
+  private constructor(poolSize: number = 3) {
+    for (let i = 0; i < poolSize; i++) {
+      const client = new DucklingClient({
+        url: process.env.DUCKLING_WS_URL!,
+        apiKey: process.env.DUCKLING_API_KEY!,
+        autoReconnect: true
+      });
+      this.clients.push(client);
+    }
+  }
+
+  static getInstance(): DashboardConnectionPool {
+    if (!this.instance) {
+      this.instance = new DashboardConnectionPool();
+    }
+    return this.instance;
+  }
+
+  getClient(): DucklingClient {
+    const client = this.clients[this.currentIndex];
+    this.currentIndex = (this.currentIndex + 1) % this.clients.length;
+    return client;
+  }
+}
+
+export const pool = DashboardConnectionPool.getInstance();
+
+// Usage in components
+const client = pool.getClient();
+```
+
+## Error Handling & Resilience
+
+### Auto-Reconnect with Visual Feedback
+
+```tsx
+import { useState, useEffect } from 'react';
+import { DucklingClient } from '@chittihq/duckling';
+
+export function ConnectionStatus({ client }: { client: DucklingClient }) {
+  const [status, setStatus] = useState<'connected' | 'disconnected' | 'reconnecting'>('disconnected');
+
+  useEffect(() => {
+    const handleConnect = () => setStatus('connected');
+    const handleDisconnect = () => setStatus('reconnecting');
+    const handleError = () => setStatus('disconnected');
+
+    client.on('connected', handleConnect);
+    client.on('disconnected', handleDisconnect);
+    client.on('error', handleError);
+
+    return () => {
+      client.off('connected', handleConnect);
+      client.off('disconnected', handleDisconnect);
+      client.off('error', handleError);
+    };
+  }, [client]);
+
+  const statusColors = {
+    connected: 'bg-green-500',
+    disconnected: 'bg-red-500',
+    reconnecting: 'bg-yellow-500'
+  };
+
+  return (
+    <div className="connection-status">
+      <div className={`status-dot ${statusColors[status]}`} />
+      <span>{status.toUpperCase()}</span>
+    </div>
+  );
+}
+```
+
+### Graceful Degradation
+
+```typescript
+import { DucklingClient } from '@chittihq/duckling';
+
+interface CachedMetrics {
+  data: DashboardMetrics;
+  timestamp: number;
+}
+
+class ResilientDashboard {
+  private client: DucklingClient;
+  private cache: CachedMetrics | null = null;
+  private readonly CACHE_TTL = 300000; // 5 minutes
+
+  async getMetrics(): Promise<DashboardMetrics> {
+    try {
+      const data = await this.fetchMetrics();
+      this.cache = { data, timestamp: Date.now() };
+      return data;
+    } catch (error) {
+      console.error('Failed to fetch metrics:', error);
+
+      // Return cached data if available and fresh
+      if (this.cache && Date.now() - this.cache.timestamp < this.CACHE_TTL) {
+        console.log('Using cached metrics');
+        return this.cache.data;
+      }
+
+      throw new Error('Unable to fetch metrics and no cached data available');
+    }
+  }
+
+  private async fetchMetrics(): Promise<DashboardMetrics> {
+    const results = await this.client.queryBatch([
+      'SELECT COUNT(*) as count FROM User',
+      'SELECT COUNT(*) as count FROM `Order`',
+      'SELECT SUM(total) as sum FROM `Order`'
+    ]);
+
+    return {
+      totalUsers: (results[0][0] as any).count,
+      totalOrders: (results[1][0] as any).count,
+      totalRevenue: (results[2][0] as any).sum
+    };
+  }
+}
+```
+
+## Best Practices
+
+<Note>
+**Key Recommendations:**
+
+1. **Batch queries**: Use `queryBatch()` for multiple dashboard metrics
+2. **Optimize refresh intervals**: Match refresh rate to data volatility
+3. **Handle disconnections**: Use auto-reconnect and show connection status
+4. **Cache strategically**: Cache recent data for graceful degradation
+5. **Monitor performance**: Track query latency and refresh rate
+6. **Use TypeScript types**: Define metric interfaces for type safety
+7. **Connection pooling**: Use pools for multiple concurrent dashboards
+</Note>
+
+## Next Steps
+
+- [Node.js Integration](/guides/nodejs-integration) - Complete SDK documentation
+- [Microservices Architecture](/guides/microservices) - Integrate into services
+- [API Reference](/api-reference) - Full API documentation

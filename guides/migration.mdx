@@ -1,0 +1,564 @@
+---
+title: 'Migration Guide'
+description: 'Migrate to Duckling from other solutions'
+---
+
+## Overview
+
+This guide helps you migrate from other analytical solutions to Duckling. Whether you're coming from MariaDB ColumnStore, ClickHouse, or custom replication scripts, Duckling offers a simpler, more cost-effective alternative.
+
+## Why Migrate to Duckling?
+
+### vs MariaDB ColumnStore
+
+**Duckling wins on**:
+- **Cost**: $20/month vs $500+/month (no 128GB RAM requirement)
+- **Simplicity**: Single DuckDB file vs complex ColumnStore cluster
+- **Correctness**: Handles empty strings correctly (ColumnStore has bugs)
+- **Deployment**: Docker Compose vs multi-server setup
+
+**ColumnStore wins when**:
+- You have 100TB+ of data
+- You need distributed queries across multiple nodes
+- You have dedicated ops team
+
+<Note>
+For most teams with < 10TB of data, Duckling provides better price/performance.
+</Note>
+
+### vs ClickHouse
+
+**Duckling wins on**:
+- **Simplicity**: No ZooKeeper, no cluster management
+- **ACID**: Real transactions, not eventual consistency
+- **JOINs**: No JOIN limits or special syntax
+- **Operations**: Single server, no ops overhead
+
+**ClickHouse wins when**:
+- You're ingesting 100K+ rows/sec continuously
+- You have 10B+ row tables
+- You have dedicated database ops team
+- You need distributed queries
+
+<Note>
+ClickHouse is powerful but operationally complex. Use Duckling unless you truly need ClickHouse's scale.
+</Note>
+
+### vs Custom MySQL Read Replicas
+
+**Duckling wins on**:
+- **Query Performance**: 100-13,000x faster analytical queries
+- **Storage**: Columnar compression saves 60-90% disk space
+- **Replication**: Automatic schema detection, watermark-based incremental sync
+- **Maintenance**: Zero manual intervention with automation features
+
+**Read replicas win when**:
+- You need transactional consistency (real-time reads)
+- You need to support MySQL-specific features (stored procedures, triggers)
+
+## Migration Strategies
+
+## Strategy 1: Parallel Testing (Recommended)
+
+Run Duckling alongside your existing solution to validate performance and correctness.
+
+### Step 1: Deploy Duckling
+
+```bash
+# Clone repository
+git clone <repository>
+cd duckling
+
+# Configure
+cp .env.example .env
+nano .env  # Edit configuration
+
+# Start
+docker-compose up -d
+```
+
+### Step 2: Configure MySQL Connection
+
+```bash
+# .env
+MYSQL_CONNECTION_STRING=mysql://user:password@host:port/database
+DUCKDB_PATH=data/duckling.db
+DUCKLING_API_KEY=your-secret-key
+
+# Restart
+docker-compose restart duckdb-server
+```
+
+### Step 3: Initial Full Sync
+
+```bash
+# Trigger full sync
+curl -X POST http://localhost:3001/api/sync/full \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+
+# Monitor progress
+curl http://localhost:3001/api/sync/status
+
+# Check logs
+curl "http://localhost:3001/api/sync-logs?limit=20"
+```
+
+<Note>
+**Initial sync time**: Expect ~60,000 rows/sec with the Appender API. A 10M row table takes ~3 minutes.
+</Note>
+
+### Step 4: Run Comparison Queries
+
+Execute the same queries on both systems:
+
+```bash
+# Existing solution (e.g., ClickHouse)
+clickhouse-client --query "SELECT COUNT(*) FROM users WHERE status = 'active'"
+
+# Duckling
+curl -X POST http://localhost:3001/api/query \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT COUNT(*) FROM users WHERE status = 'active'"}'
+```
+
+**Compare**:
+- Query results (should match)
+- Query latency
+- Resource usage
+
+### Step 5: Validate Data Integrity
+
+```bash
+# Compare row counts for all tables
+curl http://localhost:3001/api/sync/validate
+
+# Check specific table
+docker exec duckling-server node scripts/mysql.js \
+  "SELECT COUNT(*) FROM users"
+
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "SELECT COUNT(*) FROM users"}'
+```
+
+### Step 6: Test Incremental Sync
+
+```bash
+# Enable incremental sync
+# .env
+ENABLE_INCREMENTAL_SYNC=true
+SYNC_INTERVAL_MINUTES=15
+
+# Restart
+docker-compose restart duckdb-server
+
+# Make changes in MySQL
+docker exec duckling-server node scripts/mysql.js \
+  "INSERT INTO users (name, email) VALUES ('Test User', 'test@example.com')"
+
+# Wait for next sync cycle (or trigger manually)
+curl -X POST http://localhost:3001/api/sync/incremental
+
+# Verify record appeared
+curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "SELECT * FROM users WHERE email = 'test@example.com'"}'
+```
+
+### Step 7: Benchmark Performance
+
+Run your actual analytical workload:
+
+```bash
+# Example: Daily aggregation report
+time curl -X POST http://localhost:3001/api/query \
+  -d '{"sql": "SELECT DATE(created_at) as day, COUNT(*) as orders, SUM(total) as revenue FROM orders WHERE created_at >= '2025-01-01' GROUP BY day"}'
+```
+
+Compare against existing solution.
+
+### Step 8: Gradual Cutover
+
+Once validated:
+
+1. **Week 1**: Point non-critical dashboards to Duckling
+2. **Week 2**: Migrate more dashboards, monitor closely
+3. **Week 3**: Migrate critical reports
+4. **Week 4**: Decommission old solution
+
+## Strategy 2: Direct Migration
+
+Replace existing solution immediately (higher risk).
+
+### Prerequisites
+
+<Warning>
+**Before direct migration**:
+
+- [ ] Backup existing solution
+- [ ] Test Duckling in development environment
+- [ ] Verify all queries are compatible
+- [ ] Plan rollback procedure
+- [ ] Schedule maintenance window
+</Warning>
+
+### Step 1: Backup Current System
+
+```bash
+# Example: ClickHouse backup
+clickhouse-client --query "BACKUP TABLE users TO DISK 'backups'"
+
+# Example: MySQL backup
+mysqldump -h host -u user -p database > backup.sql
+```
+
+### Step 2: Deploy Duckling
+
+```bash
+git clone <repository>
+cd duckling
+cp .env.example .env
+# Configure .env
+docker-compose up -d
+```
+
+### Step 3: Full Sync
+
+```bash
+curl -X POST http://localhost:3001/api/sync/full
+```
+
+### Step 4: Update Applications
+
+Update application connection strings:
+
+**Before (ClickHouse)**:
+```javascript
+const client = createClient({
+  host: 'clickhouse-server',
+  port: 8123
+});
+```
+
+**After (Duckling REST API)**:
+```javascript
+const response = await fetch('http://localhost:3001/api/query', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer your-api-key'
+  },
+  body: JSON.stringify({ sql: 'SELECT * FROM users' })
+});
+```
+
+**Or use MySQL protocol** (port 3307):
+```javascript
+const mysql = require('mysql2');
+const connection = mysql.createConnection({
+  host: 'localhost',
+  port: 3307,
+  user: 'duckling',
+  password: 'your-api-key'
+});
+```
+
+### Step 5: Verify and Monitor
+
+```bash
+# Health check
+curl http://localhost:3001/health
+
+# Monitor sync logs
+open http://localhost:3001/logs.html
+
+# Check observability dashboard
+open http://localhost:3001/observe
+```
+
+### Step 6: Decommission Old System
+
+After 1-2 weeks of stable operation:
+
+```bash
+# Stop old system
+docker-compose -f old-system.yml down
+
+# Archive backups
+tar -czf old-system-backup.tar.gz backups/
+```
+
+## Query Translation Guide
+
+### ClickHouse to Duckling
+
+**Date functions**:
+```sql
+-- ClickHouse
+SELECT toDate(created_at) FROM orders;
+
+-- Duckling (DuckDB)
+SELECT CAST(created_at AS DATE) FROM orders;
+SELECT DATE(created_at) FROM orders;  -- Shorthand
+```
+
+**Array functions**:
+```sql
+-- ClickHouse
+SELECT arrayJoin(tags) FROM posts;
+
+-- Duckling (DuckDB)
+SELECT UNNEST(tags) FROM posts;
+```
+
+**Window functions**:
+```sql
+-- ClickHouse
+SELECT rowNumberInAllBlocks() OVER (ORDER BY id) FROM users;
+
+-- Duckling (DuckDB)
+SELECT ROW_NUMBER() OVER (ORDER BY id) FROM users;
+```
+
+**JSON extraction**:
+```sql
+-- ClickHouse
+SELECT JSONExtractString(metadata, 'key') FROM events;
+
+-- Duckling (DuckDB)
+SELECT metadata->>'key' FROM events;
+SELECT json_extract_string(metadata, '$.key') FROM events;
+```
+
+### MariaDB ColumnStore to Duckling
+
+Most MySQL queries work as-is. Key differences:
+
+**LIMIT with OFFSET**:
+```sql
+-- ColumnStore (0-based offset)
+SELECT * FROM users LIMIT 10 OFFSET 0;
+
+-- Duckling (same syntax)
+SELECT * FROM users LIMIT 10 OFFSET 0;
+```
+
+**Date arithmetic**:
+```sql
+-- ColumnStore
+SELECT DATE_ADD(created_at, INTERVAL 7 DAY) FROM orders;
+
+-- Duckling
+SELECT created_at + INTERVAL 7 DAY FROM orders;
+```
+
+**GROUP_CONCAT**:
+```sql
+-- ColumnStore
+SELECT GROUP_CONCAT(name) FROM users;
+
+-- Duckling
+SELECT STRING_AGG(name, ',') FROM users;
+```
+
+### MySQL Read Replica to Duckling
+
+<Note>
+Most MySQL analytical queries work unchanged in Duckling (DuckDB supports MySQL dialect).
+</Note>
+
+**Exceptions**:
+
+1. **Stored procedures**: Not supported (move logic to application)
+2. **Triggers**: Not replicated
+3. **Foreign keys**: Not enforced
+4. **MySQL-specific functions**: May need translation
+
+## Data Migration Checklist
+
+<Accordion title="Pre-Migration">
+- [ ] Audit current analytical queries
+- [ ] Identify tables to replicate
+- [ ] Check for unsupported types (spatial, etc.)
+- [ ] Estimate initial sync time
+- [ ] Plan for multi-database setup if needed
+- [ ] Configure S3 backups for production
+- [ ] Set up monitoring/alerting
+</Accordion>
+
+<Accordion title="During Migration">
+- [ ] Deploy Duckling
+- [ ] Configure MySQL connection
+- [ ] Trigger full sync
+- [ ] Validate row counts
+- [ ] Test critical queries
+- [ ] Enable incremental sync
+- [ ] Monitor sync logs
+- [ ] Update application connection strings
+</Accordion>
+
+<Accordion title="Post-Migration">
+- [ ] Monitor query performance
+- [ ] Set up automation (backups, cleanup)
+- [ ] Document new architecture
+- [ ] Train team on Duckling dashboard
+- [ ] Decommission old solution
+- [ ] Archive old backups
+</Accordion>
+
+## Rollback Procedure
+
+If migration fails:
+
+### Step 1: Stop Duckling
+
+```bash
+docker-compose down
+```
+
+### Step 2: Revert Application Changes
+
+Revert connection strings to old solution.
+
+### Step 3: Restart Old System
+
+```bash
+# Example: ClickHouse
+sudo systemctl start clickhouse-server
+
+# Example: ColumnStore
+sudo systemctl start mariadb-columnstore
+```
+
+### Step 4: Verify Service
+
+```bash
+# Test old system
+clickhouse-client --query "SELECT 1"
+```
+
+### Step 5: Post-Mortem
+
+Document what went wrong:
+- Query incompatibilities?
+- Performance issues?
+- Data integrity problems?
+- Configuration errors?
+
+Address issues before retrying migration.
+
+## Multi-Database Migration
+
+Migrating multiple databases:
+
+### Option 1: Sequential Migration
+
+Migrate one database at a time:
+
+```bash
+# Week 1: Database A
+curl -X POST http://localhost:3001/api/databases \
+  -d '{"name": "DB A", "mysqlConnectionString": "...", "duckdbPath": "data/db_a.db"}'
+
+# Sync, test, validate
+curl -X POST 'http://localhost:3001/api/sync/full?db=db_a'
+
+# Week 2: Database B
+curl -X POST http://localhost:3001/api/databases \
+  -d '{"name": "DB B", "mysqlConnectionString": "...", "duckdbPath": "data/db_b.db"}'
+
+curl -X POST 'http://localhost:3001/api/sync/full?db=db_b'
+```
+
+### Option 2: Parallel Migration
+
+Migrate all databases simultaneously:
+
+```bash
+# Add all databases
+curl -X POST http://localhost:3001/api/databases -d '{...}'
+curl -X POST http://localhost:3001/api/databases -d '{...}'
+
+# Trigger full sync (parallel)
+curl -X POST 'http://localhost:3001/api/sync/full?db=db_a' &
+curl -X POST 'http://localhost:3001/api/sync/full?db=db_b' &
+wait
+```
+
+<Note>
+Each database syncs independently with isolated connection pools.
+</Note>
+
+## Production Deployment Tips
+
+### Resource Planning
+
+**CPU**: 4-8 cores recommended
+- 1 core for DuckDB queries
+- 2-4 cores for worker threads (row sanitization)
+- 1-2 cores for sync orchestration
+
+**Memory**: 8-16 GB recommended
+- DuckDB uses ~2-4 GB for caching
+- Worker threads: ~1 GB per thread
+- MySQL connection pool: ~500 MB
+
+**Disk**: SSD strongly recommended
+- 2-5x the size of MySQL database (for DuckDB + backups)
+- Example: 100 GB MySQL → 200-500 GB disk
+
+### High Availability
+
+<Accordion title="Option 1: Backup + Restore">
+Use S3 backups for disaster recovery:
+
+```bash
+# .env
+AUTO_BACKUP=true
+BACKUP_INTERVAL_HOURS=6  # Backup every 6 hours
+
+# Configure S3 in dashboard
+# /backups page → S3 settings
+```
+
+**Recovery Time**: Download from S3 (~5 min for 100 GB)
+</Accordion>
+
+<Accordion title="Option 2: Active-Passive">
+Run two Duckling instances:
+
+- **Primary**: Handles all queries and sync
+- **Secondary**: Standby, periodic sync from MySQL
+
+On primary failure:
+1. Promote secondary to primary
+2. Update DNS/load balancer
+3. Restart sync on new primary
+
+**Failover Time**: ~1-2 minutes
+</Accordion>
+
+### Security
+
+```bash
+# .env
+DUCKLING_API_KEY=<strong-random-key>  # Use 32+ char key
+MYSQL_PROTOCOL_PASSWORD=<strong-random-key>  # Separate password for MySQL protocol
+
+# Enable HTTPS (via nginx reverse proxy)
+# See docs/DEPLOYMENT.md
+```
+
+**Firewall**:
+```bash
+# Allow only necessary ports
+sudo ufw allow 3001/tcp  # API (internal only)
+sudo ufw allow 3000/tcp  # Dashboard (internal only)
+sudo ufw allow 443/tcp   # HTTPS (public)
+sudo ufw deny 3307/tcp   # MySQL protocol (internal only)
+```
+
+## Related Topics
+
+- [Type Support](/guides/type-support) - Verify type compatibility
+- [Schema Evolution](/guides/schema-evolution) - Handle schema changes
+- [Common Issues](/guides/common-issues) - Troubleshoot migration problems
+- [Debugging](/guides/debugging) - Debug migration issues

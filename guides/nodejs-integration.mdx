@@ -1,0 +1,389 @@
+---
+title: 'Node.js Integration Guide'
+description: 'Integrate Duckling WebSocket SDK into your Node.js applications for high-performance queries'
+icon: 'node-js'
+---
+
+## Overview
+
+The Duckling WebSocket SDK provides a high-performance TypeScript client for querying DuckDB with 5-15ms latency (vs 50-100ms for HTTP). This guide shows you how to integrate it into your Node.js applications.
+
+## Installation
+
+<Steps>
+  <Step title="Install the SDK">
+    ```bash
+    npm install @chittihq/duckling
+    # or
+    pnpm add @chittihq/duckling
+    # or
+    yarn add @chittihq/duckling
+    ```
+  </Step>
+
+  <Step title="Set up environment variables">
+    Create a `.env` file with your API credentials:
+    ```bash
+    DUCKLING_API_KEY=your-api-key-here
+    DUCKLING_WS_URL=ws://localhost:3001/ws
+    ```
+  </Step>
+
+  <Step title="Import and initialize the client">
+    ```typescript
+    import { DucklingClient } from '@chittihq/duckling';
+
+    const client = new DucklingClient({
+      url: process.env.DUCKLING_WS_URL || 'ws://localhost:3001/ws',
+      apiKey: process.env.DUCKLING_API_KEY,
+      databaseName: 'default'  // Optional - defaults to 'default'
+    });
+    ```
+  </Step>
+</Steps>
+
+## Basic Usage
+
+### Simple Query
+
+The SDK auto-connects on first query - no need to call `connect()` manually:
+
+```typescript
+import { DucklingClient } from '@chittihq/duckling';
+
+const client = new DucklingClient({
+  url: 'ws://localhost:3001/ws',
+  apiKey: process.env.DUCKLING_API_KEY
+});
+
+// Auto-connects on first query
+const users = await client.query('SELECT * FROM User LIMIT 10');
+console.table(users);
+
+// Get total count
+const countResult = await client.query<{ count: number }>(
+  'SELECT COUNT(*) as count FROM User'
+);
+console.log(`Total users: ${countResult[0].count}`);
+
+// Always close when done
+client.close();
+```
+
+### TypeScript Type Safety
+
+Define your schema types for full IntelliSense support:
+
+<CodeGroup>
+```typescript Basic Types
+interface User {
+  id: number;
+  name: string;
+  email: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+const users = await client.query<User>('SELECT * FROM User LIMIT 10');
+// TypeScript knows: users is User[]
+// Auto-complete works: users[0].email, users[0].name, etc.
+```
+
+```typescript Complex Queries
+interface UserWithOrderCount extends User {
+  orderCount: number;
+}
+
+const usersWithOrders = await client.query<UserWithOrderCount>(`
+  SELECT
+    u.*,
+    COUNT(o.id) as orderCount
+  FROM User u
+  LEFT JOIN \`Order\` o ON u.id = o.userId
+  GROUP BY u.id
+  LIMIT 10
+`);
+
+console.log(`User: ${usersWithOrders[0].name}`);
+console.log(`Orders: ${usersWithOrders[0].orderCount}`);
+```
+
+```typescript Aggregate Queries
+interface OrderStats {
+  totalOrders: number;
+  totalRevenue: number;
+  avgOrderValue: number;
+  minOrderValue: number;
+  maxOrderValue: number;
+}
+
+const stats = await client.query<OrderStats>(`
+  SELECT
+    COUNT(*) as totalOrders,
+    SUM(total) as totalRevenue,
+    AVG(total) as avgOrderValue,
+    MIN(total) as minOrderValue,
+    MAX(total) as maxOrderValue
+  FROM \`Order\`
+`);
+
+console.log('Order statistics:', stats[0]);
+```
+</CodeGroup>
+
+## Advanced Features
+
+### Parallel Queries
+
+Execute multiple queries concurrently for 3-5x faster performance:
+
+```typescript
+const queries = [
+  'SELECT COUNT(*) FROM User',
+  'SELECT COUNT(*) FROM Product',
+  'SELECT COUNT(*) FROM ActivityLog'
+];
+
+const results = await client.queryBatch(queries);
+// 3-5x faster than sequential execution
+
+console.log('User count:', results[0][0]);
+console.log('Product count:', results[1][0]);
+console.log('Activity count:', results[2][0]);
+```
+
+### Pagination
+
+Automatic LIMIT and OFFSET handling:
+
+```typescript
+const result = await client.queryPaginated<User>(
+  'SELECT * FROM User ORDER BY createdAt DESC',
+  { limit: 20, offset: 0 }
+);
+
+console.log(`Page: ${result.data.length} users`);
+console.log(`Has more: ${result.pagination.hasMore}`);
+console.log(`Next offset: ${result.pagination.offset + result.pagination.limit}`);
+```
+
+### Batch Queries with Error Handling
+
+Handle individual query failures gracefully:
+
+```typescript
+import { BatchQueryRequest, BatchQueryResult } from '@chittihq/duckling';
+
+const requests: BatchQueryRequest[] = [
+  { sql: 'SELECT * FROM User LIMIT 10' },
+  { sql: 'SELECT * FROM Order LIMIT 10' },
+  { sql: 'SELECT * FROM InvalidTable' }  // This will fail
+];
+
+const results = await client.queryBatchDetailed(requests);
+
+results.forEach((result, index) => {
+  if (result.success) {
+    console.log(`Query ${index + 1}: Success (${result.data?.length} rows in ${result.duration}ms)`);
+  } else {
+    console.error(`Query ${index + 1}: Failed - ${result.error}`);
+  }
+});
+```
+
+## Multi-Database Support
+
+Connect to multiple databases simultaneously:
+
+```typescript
+// Each WebSocket connection is bound to one database
+const lmsClient = new DucklingClient({
+  url: 'ws://localhost:3001/ws',
+  apiKey: process.env.DUCKLING_API_KEY,
+  databaseName: 'lms'
+});
+
+const chittiClient = new DucklingClient({
+  url: 'ws://localhost:3001/ws',
+  apiKey: process.env.DUCKLING_API_KEY,
+  databaseName: 'chitti_common'
+});
+
+// Each client queries its own database
+const lmsUsers = await lmsClient.query('SELECT * FROM User');
+const chittiActions = await chittiClient.query('SELECT * FROM Action');
+
+// Clean up
+lmsClient.close();
+chittiClient.close();
+```
+
+## Configuration Options
+
+```typescript
+interface DuckDBSDKConfig {
+  url: string;                    // WebSocket server URL
+  apiKey: string;                 // API key for authentication
+  databaseName?: string;          // Database to connect to (default: 'default')
+  autoConnect?: boolean;          // Auto-connect on first query (default: true)
+  autoPing?: boolean;             // Auto-ping to keep alive (default: true)
+  pingInterval?: number;          // Ping interval in ms (default: 30000)
+  autoReconnect?: boolean;        // Auto-reconnect on failure (default: true)
+  maxReconnectAttempts?: number;  // Max reconnection attempts (default: 5)
+  reconnectDelay?: number;        // Reconnect delay in ms (default: 1000)
+  connectionTimeout?: number;     // Connection timeout in ms (default: 5000)
+}
+```
+
+### Auto-Reconnection
+
+```typescript
+const client = new DucklingClient({
+  url: 'ws://localhost:3001/ws',
+  apiKey: process.env.DUCKLING_API_KEY,
+  autoReconnect: true,          // default: true
+  maxReconnectAttempts: 5,      // default: 5
+  reconnectDelay: 1000          // default: 1000ms, exponential backoff
+});
+
+// Connection will auto-reconnect up to 5 times on failure
+// Delays: 1s, 2s, 3s, 4s, 5s
+```
+
+## Event Handling
+
+Listen to connection lifecycle events:
+
+```typescript
+client.on('connected', () => {
+  console.log('Connected to DuckDB server');
+});
+
+client.on('disconnected', () => {
+  console.log('Disconnected from server');
+});
+
+client.on('error', (error: Error) => {
+  console.error('WebSocket error:', error.message);
+});
+
+// Query with error handling
+try {
+  const result = await client.query('SELECT * FROM NonExistentTable');
+} catch (error) {
+  console.error('Query failed:', error.message);
+}
+```
+
+## Connection Monitoring
+
+Check connection status and statistics:
+
+```typescript
+// Check if connected
+if (client.isConnected()) {
+  console.log('Client is ready to execute queries');
+}
+
+// Get connection stats
+const stats = client.getStats();
+console.log(stats);
+// {
+//   connected: true,
+//   authenticated: true,
+//   pendingRequests: 2,
+//   reconnectAttempts: 0,
+//   url: 'ws://localhost:3001/ws'
+// }
+
+// Test connection with ping
+const isAlive = await client.ping();
+console.log(`Connection alive: ${isAlive}`);
+```
+
+## Performance Tips
+
+<Note>
+**Latency Comparison:**
+- HTTP API: 50-100ms per query
+- WebSocket SDK: 5-15ms per query
+- **10x faster for real-time dashboards**
+</Note>
+
+### Throughput Benchmarks
+
+| Method | Throughput | Use Case |
+|--------|------------|----------|
+| Sequential | ~20-50 queries/sec | Simple queries |
+| Parallel (single connection) | ~500-1,000 queries/sec | Batch processing |
+| Connection Pool | ~2,000-5,000 queries/sec | High concurrency |
+| Maximum Capacity | 10,000+ queries/sec | Enterprise scale |
+
+### Best Practices
+
+1. **Reuse connections**: Create one client per database and reuse it
+2. **Use parallel queries**: Batch multiple queries with `queryBatch()`
+3. **Enable auto-ping**: Keeps connection alive (enabled by default)
+4. **Close when done**: Always call `client.close()` to free resources
+5. **Handle errors**: Wrap queries in try-catch blocks
+6. **Use TypeScript types**: Define schema interfaces for type safety
+
+## Complete Example
+
+Here's a complete Express.js API endpoint using the SDK:
+
+```typescript
+import express from 'express';
+import { DucklingClient } from '@chittihq/duckling';
+
+const app = express();
+
+// Initialize client once at startup
+const client = new DucklingClient({
+  url: process.env.DUCKLING_WS_URL || 'ws://localhost:3001/ws',
+  apiKey: process.env.DUCKLING_API_KEY
+});
+
+interface User {
+  id: number;
+  name: string;
+  email: string;
+  createdAt: string;
+}
+
+// API endpoint handler
+app.get('/api/users/:id', async (req, res) => {
+  try {
+    const user = await client.query<User>(
+      'SELECT * FROM User WHERE id = ?',
+      [req.params.id]
+    );
+
+    if (user.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json(user[0]);
+  } catch (error) {
+    console.error('Query failed:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('Closing DuckDB connection...');
+  client.close();
+  process.exit(0);
+});
+
+app.listen(3000, () => {
+  console.log('Server running on http://localhost:3000');
+});
+```
+
+## Next Steps
+
+- [Real-Time Dashboards](/guides/real-time-dashboards) - Build live dashboards with WebSocket streaming
+- [Microservices Architecture](/guides/microservices) - Integrate Duckling into microservices
+- [API Reference](/api-reference) - Complete API documentation

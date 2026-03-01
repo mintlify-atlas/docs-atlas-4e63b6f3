@@ -1,0 +1,408 @@
+---
+title: "Read Replica Functionality"
+description: "Isolate read queries from write operations using periodic snapshots"
+---
+
+# Read Replica Functionality
+
+Duckling's Read Replica service provides optional read-only replica support for DuckDB. It periodically snapshots the primary database and opens it in READ_ONLY mode, allowing API queries to be routed to the replica to avoid interference with write operations (sync, CDC).
+
+## Overview
+
+DuckDB uses MVCC (Multi-Version Concurrency Control) for read/write isolation **within a single process**. However, for maximum isolation (preventing read queries from blocking writes), the Read Replica service creates a **physical copy** of the database file and opens it in READ_ONLY mode.
+
+**Architecture:**
+```text
+Primary DuckDB (Read/Write) → Periodic Snapshot → Replica DuckDB (Read-Only)
+        ↓                           ↓                      ↓
+  Sync/CDC Writes            Atomic Copy           API Queries (stale by N seconds)
+```
+
+## Trade-Offs
+
+| Aspect | Impact |
+|--------|--------|
+| **Data Staleness** | Queries see data stale by up to `REPLICA_REFRESH_INTERVAL` seconds |
+| **Disk Space** | Requires ~2x disk space during copy (e.g., 400 GB for 200 GB database) |
+| **Copy Time** | ~60-90 seconds for 200 GB database on SSD |
+| **Write Isolation** | Zero interference — writes never block reads |
+| **Read Performance** | Same as primary (columnar, compressed) |
+
+<Warning>
+  **Disk Space**: Ensure sufficient free space (2x database size) before enabling read replicas.
+</Warning>
+
+## Environment Variables
+
+<ParamField path="READ_REPLICA_ENABLED" type="boolean" default="false">
+  Enable read replica mode for isolating read queries from write operations
+</ParamField>
+
+<ParamField path="REPLICA_REFRESH_INTERVAL" type="number" default="300">
+  Seconds between snapshots (5 minutes default). Higher values = less disk I/O, more stale data.
+</ParamField>
+
+## Configuration Example
+
+```bash .env
+# Enable read replicas
+READ_REPLICA_ENABLED=true
+
+# Refresh every 10 minutes (600 seconds)
+REPLICA_REFRESH_INTERVAL=600
+```
+
+## How It Works
+
+### Snapshot Process
+
+1. **Close Existing Replica**: Close read-only connection to current snapshot
+2. **Atomic Copy**: Copy primary `.db` file to `.ro.db.tmp`
+3. **Atomic Rename**: Rename `.ro.db.tmp` → `.ro.db` (atomic operation)
+4. **Open Read-Only**: Open `.ro.db` in `READ_ONLY` mode
+5. **Update Timestamp**: Record `lastRefreshedAt` timestamp
+
+**Atomicity Guarantee:**
+- Queries never see a partial/corrupted file (rename is atomic)
+- If copy fails, old replica remains available
+
+### File Structure
+
+```
+data/
+├── production.db          # Primary (read/write)
+├── production.ro.db       # Replica (read-only)
+└── production.ro.db.tmp   # Temporary during refresh (deleted after)
+```
+
+### Query Routing
+
+When `READ_REPLICA_ENABLED=true`:
+
+```typescript
+// API query logic
+if (readReplicaService.isAvailable()) {
+  // Route to replica (stale but isolated)
+  result = await readReplicaService.executeReadOnly(sql, params);
+  
+  if (result === null) {
+    // Replica not ready or error — fallback to primary
+    result = await duckdb.execute(sql, params);
+  }
+} else {
+  // Replica disabled — use primary
+  result = await duckdb.execute(sql, params);
+}
+```
+
+**Fallback Behavior:**
+- If replica is not ready (first snapshot in progress), fall back to primary
+- If replica query fails, fall back to primary
+- If `READ_REPLICA_ENABLED=false`, always use primary
+
+## Refresh Scheduling
+
+The replica refreshes on a **fixed interval** starting from service start:
+
+```typescript
+class ReadReplicaService {
+  async start(): Promise<void> {
+    // Initial snapshot (blocking)
+    await this.refreshReplica();
+
+    // Schedule periodic refreshes
+    this.refreshTimer = setInterval(
+      () => this.refreshReplica(),
+      this.refreshInterval * 1000
+    );
+  }
+}
+```
+
+**Example Timeline (300s interval):**
+```
+T=0s:   Service starts, initial snapshot (blocking)
+T=90s:  Snapshot completes, replica available
+T=300s: Refresh #1 starts
+T=390s: Refresh #1 completes
+T=600s: Refresh #2 starts
+...
+```
+
+## Monitoring
+
+### Status API
+
+Get replica status:
+
+```bash
+curl http://localhost:3001/api/replica/status?db=production \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "enabled": true,
+  "databaseId": "production",
+  "primaryPath": "data/production.db",
+  "replicaPath": "data/production.ro.db",
+  "lastRefreshedAt": "2025-03-01T14:25:00.000Z",
+  "refreshIntervalSeconds": 300,
+  "isRefreshing": false,
+  "totalRefreshes": 142,
+  "totalErrors": 0
+}
+```
+
+### Key Metrics
+
+<ParamField path="lastRefreshedAt" type="Date">
+  Timestamp of last successful snapshot. Data is stale by `now - lastRefreshedAt`.
+</ParamField>
+
+<ParamField path="isRefreshing" type="boolean">
+  True if snapshot is currently in progress (queries use old replica or fall back to primary).
+</ParamField>
+
+<ParamField path="totalErrors" type="number">
+  Number of failed snapshot attempts. Non-zero indicates issues (disk space, file locks).
+</ParamField>
+
+### Availability Check
+
+```typescript
+const isAvailable = readReplicaService.isAvailable();
+// Returns true if:
+//   - READ_REPLICA_ENABLED=true
+//   - Replica connection is open
+//   - Last refresh succeeded
+```
+
+## Data Staleness
+
+### Measuring Staleness
+
+Data staleness depends on:
+
+1. **Refresh Interval**: `REPLICA_REFRESH_INTERVAL` seconds
+2. **Copy Duration**: Time to copy primary → replica (depends on file size + disk I/O)
+3. **Write Rate**: How fast primary is changing during copy
+
+**Worst-Case Staleness:**
+```
+max_staleness = REPLICA_REFRESH_INTERVAL + copy_duration
+```
+
+**Example (200 GB database, 90s copy, 300s interval):**
+```
+max_staleness = 300s + 90s = 390s (6.5 minutes)
+```
+
+### Use Cases by Staleness Tolerance
+
+| Staleness Tolerance | Use Case | Recommended Interval |
+|---------------------|----------|---------------------|
+| < 1 minute | Real-time dashboards | Use CDC instead |
+| 1-5 minutes | Analytics dashboards | 60-300 seconds |
+| 5-15 minutes | Reporting queries | 300-900 seconds |
+| > 15 minutes | Batch ETL | 900+ seconds |
+
+<Note>
+  **Real-Time Queries**: For sub-minute staleness, use CDC (binlog streaming) instead of read replicas.
+</Note>
+
+## Performance Impact
+
+### Refresh Overhead
+
+| Database Size | Copy Time (SSD) | CPU Usage | I/O Impact |
+|---------------|-----------------|-----------|------------|
+| 10 GB | ~5 seconds | Low | Minimal |
+| 100 GB | ~30 seconds | Medium | Moderate |
+| 200 GB | ~90 seconds | High | Significant |
+| 500 GB | ~4 minutes | Very High | Heavy |
+
+<Warning>
+  **Large Databases**: For databases > 500 GB, consider increasing `REPLICA_REFRESH_INTERVAL` to reduce I/O load (e.g., 1800s = 30 minutes).
+</Warning>
+
+### Query Performance
+
+Read replica queries have **identical performance** to primary:
+
+- Same columnar storage format
+- Same compression algorithms
+- Same query optimizer
+
+**No performance penalty** — only staleness trade-off.
+
+## Tuning Recommendations
+
+### Small Databases (< 50 GB)
+
+```bash
+READ_REPLICA_ENABLED=true
+REPLICA_REFRESH_INTERVAL=60  # 1 minute
+```
+
+**Rationale:** Fast copy times, minimal I/O impact, low staleness
+
+### Medium Databases (50-200 GB)
+
+```bash
+READ_REPLICA_ENABLED=true
+REPLICA_REFRESH_INTERVAL=300  # 5 minutes
+```
+
+**Rationale:** Balanced staleness vs I/O impact
+
+### Large Databases (200-500 GB)
+
+```bash
+READ_REPLICA_ENABLED=true
+REPLICA_REFRESH_INTERVAL=900  # 15 minutes
+```
+
+**Rationale:** Reduce I/O load, acceptable staleness for analytics
+
+### Very Large Databases (> 500 GB)
+
+```bash
+READ_REPLICA_ENABLED=false  # Consider CDC or multi-server setup
+```
+
+**Rationale:** Copy times exceed 5 minutes, high I/O impact. Use CDC for real-time or deploy dedicated read servers.
+
+## Error Handling
+
+### Refresh Failures
+
+Common causes of snapshot failures:
+
+1. **Disk Space Exhausted**: Need 2x database size free
+2. **File Locked**: Another process has primary file locked
+3. **I/O Errors**: Disk failure or filesystem issues
+
+**Behavior on Error:**
+- Error logged to console
+- `totalErrors` counter incremented
+- Old replica remains available (no downtime)
+- Next refresh attempt occurs at next interval
+
+### Query Failures
+
+If replica query fails:
+
+1. **Close Replica Connection**: Prevent repeated failures
+2. **Log Error**: Record failure reason
+3. **Return Null**: Signal fallback to primary
+4. **Next Refresh**: Reconnect attempt at next snapshot
+
+```typescript
+async executeReadOnly(query: string): Promise<any[] | null> {
+  try {
+    return await this.readonlyConn.runAndReadAll(query);
+  } catch (error) {
+    logger.error('Read replica query failed:', error);
+    this.closeReadonlyConnection(); // Force reconnect on next refresh
+    return null; // Caller falls back to primary
+  }
+}
+```
+
+## DuckDB Constraints
+
+### Single-Process Limitation
+
+DuckDB's read/write isolation is **process-local**:
+
+- ✅ **Within Process**: Read + write use MVCC (no conflict)
+- ❌ **Across Processes**: All must open in READ_ONLY mode
+
+The Read Replica service creates a **read-only copy within the same process**, providing isolation without multi-process complexity.
+
+### READ_ONLY Mode
+
+```typescript
+const instance = await DuckDBInstance.create('data/production.ro.db', {
+  access_mode: 'READ_ONLY'
+});
+```
+
+**Restrictions:**
+- No writes allowed (INSERT, UPDATE, DELETE, CREATE TABLE, etc.)
+- No temporary tables
+- No schema changes
+- Queries-only
+
+## Troubleshooting
+
+### Replica Not Available
+
+```bash
+# Check replica status
+curl http://localhost:3001/api/replica/status?db=production
+
+# Expected:
+# - enabled: true
+# - lastRefreshedAt: recent timestamp
+# - totalErrors: 0
+```
+
+**Common Issues:**
+1. `READ_REPLICA_ENABLED=false` — enable in `.env`
+2. First snapshot in progress — wait for `lastRefreshedAt` to populate
+3. Snapshot failing — check `totalErrors` and logs
+
+### High Staleness
+
+```bash
+# Check staleness
+curl http://localhost:3001/api/replica/status?db=production | \
+  jq '((now | floor) - (.lastRefreshedAt | fromdateiso8601)) / 60'
+
+# Returns staleness in minutes
+```
+
+**Solutions:**
+1. Decrease `REPLICA_REFRESH_INTERVAL`
+2. Use faster disk (NVMe SSD)
+3. Use CDC for real-time data
+
+### Disk Space Errors
+
+```
+Read replica refresh failed: ENOSPC: no space left on device
+```
+
+**Solutions:**
+1. Free up disk space (delete old backups, logs)
+2. Increase disk size (need 2x database size free)
+3. Disable replicas: `READ_REPLICA_ENABLED=false`
+
+## Code Reference
+
+Implementation: `packages/server/src/services/readReplicaService.ts`
+
+**Key Classes:**
+- `ReadReplicaService` - Main service class (multi-instance per database)
+- `ReplicaStatus` - Status interface for monitoring
+
+**Key Methods:**
+- `start()` - Initialize and schedule refreshes (line 84)
+- `stop()` - Stop service and cleanup files (line 107)
+- `executeReadOnly()` - Execute query on replica (line 137)
+- `refreshReplica()` - Create snapshot (line 231)
+- `isAvailable()` - Check if replica is ready (line 221)
+
+**Instance Management:**
+```typescript
+const replica = ReadReplicaService.getInstance('production', 'data/production.db');
+await replica.start();
+
+const result = await replica.executeReadOnly('SELECT COUNT(*) FROM users');
+if (result === null) {
+  // Fallback to primary
+}
+```

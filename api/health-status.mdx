@@ -1,0 +1,300 @@
+---
+title: 'Health & Status'
+description: 'Health check and system status endpoints'
+---
+
+## Overview
+
+Monitor the health and status of your Duckling instance across all configured databases.
+
+## Endpoints
+
+### GET /health
+
+Check database connectivity and overall system health for all databases.
+
+**Authentication:** Required (API key or JWT)
+
+**Request Example:**
+```bash
+curl http://localhost:3001/health \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response (Healthy):**
+```json
+{
+  "status": "healthy",
+  "timestamp": "2024-01-20T10:30:00.000Z",
+  "databases": [
+    {
+      "databaseId": "lms",
+      "name": "LMS Database",
+      "status": "healthy",
+      "services": {
+        "mysql": "healthy",
+        "duckdb": "healthy"
+      }
+    },
+    {
+      "databaseId": "analytics",
+      "name": "Analytics Database",
+      "status": "healthy",
+      "services": {
+        "mysql": "healthy",
+        "duckdb": "healthy"
+      }
+    }
+  ],
+  "architecture": "sequential-appender",
+  "features": [
+    "atomic-transactions",
+    "watermark-sync",
+    "streaming-batches",
+    "acid-compliance",
+    "multi-database"
+  ]
+}
+```
+
+<ResponseField name="status" type="string">
+  Overall system health status: `healthy` or `unhealthy`
+</ResponseField>
+
+<ResponseField name="databases" type="array">
+  Health status for each configured database
+</ResponseField>
+
+<ResponseField name="databases[].status" type="string">
+  Database health status: `healthy` or `unhealthy`
+</ResponseField>
+
+<ResponseField name="databases[].services.mysql" type="string">
+  MySQL connection status
+</ResponseField>
+
+<ResponseField name="databases[].services.duckdb" type="string">
+  DuckDB connection status
+</ResponseField>
+
+<ResponseField name="architecture" type="string">
+  Current architecture mode: `sequential-appender`
+</ResponseField>
+
+<ResponseField name="features" type="array">
+  List of enabled system features
+</ResponseField>
+
+**Response (Unhealthy):**
+```json
+{
+  "status": "unhealthy",
+  "timestamp": "2024-01-20T10:30:00.000Z",
+  "databases": [
+    {
+      "databaseId": "lms",
+      "name": "LMS Database",
+      "status": "unhealthy",
+      "error": "MySQL connection failed: ECONNREFUSED"
+    }
+  ],
+  "architecture": "sequential-appender",
+  "features": ["atomic-transactions", "watermark-sync"]
+}
+```
+
+**Status Codes:**
+- `200` - System is healthy
+- `503` - System is unhealthy (one or more databases failed health check)
+
+---
+
+### GET /status
+
+Get detailed system status including uptime, memory usage, and table counts.
+
+**Authentication:** Required (API key or JWT)
+
+**Request Example:**
+```bash
+curl http://localhost:3001/status \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "uptime": 86400,
+  "memory": {
+    "rss": 134217728,
+    "heapTotal": 67108864,
+    "heapUsed": 45088768,
+    "external": 2097152,
+    "arrayBuffers": 1048576
+  },
+  "architecture": "sequential-appender",
+  "config": {
+    "syncInterval": 15,
+    "batchSize": 10000,
+    "incrementalSync": true
+  },
+  "databases": [
+    {
+      "databaseId": "lms",
+      "name": "LMS Database",
+      "tables": {
+        "mysql": 181,
+        "duckdb": 181
+      }
+    },
+    {
+      "databaseId": "analytics",
+      "name": "Analytics Database",
+      "tables": {
+        "mysql": 45,
+        "duckdb": 45
+      }
+    }
+  ]
+}
+```
+
+<ResponseField name="uptime" type="number">
+  Server uptime in seconds
+</ResponseField>
+
+<ResponseField name="memory" type="object">
+  Node.js process memory usage statistics (in bytes)
+</ResponseField>
+
+<ResponseField name="memory.rss" type="number">
+  Resident Set Size - total memory allocated for the process
+</ResponseField>
+
+<ResponseField name="memory.heapTotal" type="number">
+  Total heap memory allocated
+</ResponseField>
+
+<ResponseField name="memory.heapUsed" type="number">
+  Heap memory currently in use
+</ResponseField>
+
+<ResponseField name="config" type="object">
+  Current synchronization configuration
+</ResponseField>
+
+<ResponseField name="config.syncInterval" type="number">
+  Automatic sync frequency in minutes
+</ResponseField>
+
+<ResponseField name="config.batchSize" type="number">
+  Number of records processed per batch during sync
+</ResponseField>
+
+<ResponseField name="config.incrementalSync" type="boolean">
+  Whether incremental sync is enabled
+</ResponseField>
+
+<ResponseField name="databases" type="array">
+  Table counts for each configured database
+</ResponseField>
+
+<ResponseField name="databases[].tables.mysql" type="number">
+  Number of tables in MySQL source database
+</ResponseField>
+
+<ResponseField name="databases[].tables.duckdb" type="number">
+  Number of tables replicated in DuckDB
+</ResponseField>
+
+**Status Codes:**
+- `200` - Status retrieved successfully
+- `500` - Failed to retrieve status
+
+---
+
+## Use Cases
+
+### Container Health Checks
+
+Use the `/health` endpoint in Docker health checks:
+
+```yaml
+# docker-compose.yml
+services:
+  duckdb-server:
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+```
+
+### Kubernetes Probes
+
+```yaml
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: duckling
+    livenessProbe:
+      httpGet:
+        path: /health
+        port: 3001
+        httpHeaders:
+        - name: Authorization
+          value: Bearer ${DUCKLING_API_KEY}
+      initialDelaySeconds: 30
+      periodSeconds: 10
+    readinessProbe:
+      httpGet:
+        path: /health
+        port: 3001
+        httpHeaders:
+        - name: Authorization
+          value: Bearer ${DUCKLING_API_KEY}
+      initialDelaySeconds: 10
+      periodSeconds: 5
+```
+
+### Monitoring & Alerting
+
+```bash
+#!/bin/bash
+# health-monitor.sh
+
+RESPONSE=$(curl -s -H "Authorization: Bearer $DUCKLING_API_KEY" \
+  http://localhost:3001/health)
+
+STATUS=$(echo $RESPONSE | jq -r '.status')
+
+if [ "$STATUS" != "healthy" ]; then
+  echo "ALERT: Duckling service is unhealthy"
+  echo $RESPONSE | jq .
+  # Send alert to monitoring system
+  curl -X POST https://your-monitoring-service/alerts \
+    -d "service=duckling&status=unhealthy"
+fi
+```
+
+### Load Balancer Integration
+
+Configure load balancers to use `/health` for backend health checks:
+
+**AWS Application Load Balancer:**
+```json
+{
+  "HealthCheckProtocol": "HTTP",
+  "HealthCheckPath": "/health",
+  "HealthCheckIntervalSeconds": 30,
+  "HealthCheckTimeoutSeconds": 5,
+  "HealthyThresholdCount": 2,
+  "UnhealthyThresholdCount": 3
+}
+```
+
+<Info>
+  The `/health` endpoint returns HTTP 503 if **any** database is unhealthy, making it ideal for automated health checks and load balancer configurations.
+</Info>

@@ -1,0 +1,340 @@
+---
+title: 'Sequential Appender Architecture'
+description: 'High-performance bulk loading with DuckDB Appender API'
+---
+
+## Overview
+
+The Sequential Appender is Duckling's core innovation, providing **60,000+ rows/sec** bulk loading performance using DuckDB's native Appender API. This is **6x faster** than traditional INSERT statements and enables syncing massive datasets (60M+ records) in minutes instead of hours.
+
+## Performance Comparison
+
+| Method | Speed | Use Case |
+|--------|-------|----------|
+| **Appender API** | **60,000+ rows/sec** | Full sync (bulk loading) |
+| Traditional INSERT | ~10,000 rows/sec | Incremental sync (upserts) |
+| CDC (Real-time) | Sub-second latency | Live replication |
+
+<Info>
+  The Appender API is **6x faster** than bulk INSERT because it writes directly to DuckDB's binary format without SQL parsing overhead.
+</Info>
+
+## Implementation (`sequentialAppenderService.ts`)
+
+### Unified Architecture
+
+Duckling uses a **unified `@duckdb/node-api` architecture** for all database operations:
+
+```typescript
+import { DuckDBConnection } from '@duckdb/node-api';
+
+// Single package for queries + appends
+const { appender, connection } = await this.duckdb.createAppender(tableName);
+```
+
+### Benefits
+
+<CardGroup cols={2}>
+  <Card title="60K+ rows/sec" icon="gauge-high">
+    Direct binary append, 6x faster than INSERT
+  </Card>
+  <Card title="No Argument Limits" icon="infinity">
+    INSERT limited to 65K args (V8), Appender has no limit
+  </Card>
+  <Card title="Lower Memory" icon="memory">
+    Binary append, no SQL string construction
+  </Card>
+  <Card title="All Types Supported" icon="check">
+    JSON, BLOB, BINARY, all numeric/date types
+  </Card>
+</CardGroup>
+
+## Full Sync Workflow
+
+### 1. Crash-Safe Staging Table
+
+Full sync uses staging tables to prevent data loss on crashes:
+
+```typescript
+// Build unique staging table name
+const stagingTable = `__full_sync_staging_${tableName}_${randomUUID()}`;
+
+// Create staging table with same schema
+await this.createTable(stagingTable, schema);
+```
+
+### 2. Appender-Based Insert
+
+Stream records from MySQL and append to staging table:
+
+```typescript
+const { appender, connection } = await this.duckdb.createAppender(stagingTable);
+
+for await (const batch of this.mysql.streamTableData(tableName, fetchBatchSize)) {
+  // Sanitize rows in worker thread pool
+  const sanitizedRows = await pool.sanitizeBatch(batch, columns, columnTypes);
+  
+  // Append each row
+  for (const row of sanitizedRows) {
+    for (let i = 0; i < columns.length; i++) {
+      this.appendValueByType(appender, row[i], columnTypes[columns[i]]);
+    }
+    appender.endRow();
+  }
+  
+  // Flush periodically to free memory
+  if (recordsProcessed - lastFlushed >= FLUSH_INTERVAL) {
+    appender.flushSync();
+    lastFlushed = recordsProcessed;
+  }
+}
+
+appender.flushSync();
+appender.closeSync();
+```
+
+### 3. Atomic Swap
+
+Replace production table in a single transaction:
+
+```typescript
+await this.duckdb.run('BEGIN TRANSACTION');
+try {
+  await this.duckdb.run(`DELETE FROM ${this.q(tableName)}`);
+  await this.duckdb.run(`INSERT INTO ${this.q(tableName)} SELECT * FROM ${this.q(stagingTable)}`);
+  await this.duckdb.run('COMMIT');
+} catch (error) {
+  await this.duckdb.run('ROLLBACK');
+  throw error;
+} finally {
+  await this.dropTableIfExists(stagingTable);
+}
+```
+
+### 4. Durability Checkpoint
+
+Force WAL flush to ensure data persists:
+
+```typescript
+await this.duckdb.checkpoint();
+```
+
+<Note>
+  The staging table swap is atomic. If the server crashes mid-sync, the production table remains unchanged and the orphan staging table is automatically cleaned up on next sync.
+</Note>
+
+## Type Conversion
+
+### Supported MySQL Types
+
+| MySQL Type | DuckDB Mapping | Appender Method | Notes |
+|------------|----------------|-----------------|-------|
+| INTEGER, BIGINT, TINYINT | Same | `appendBigInt()` | All INT types map to BIGINT |
+| VARCHAR, TEXT | VARCHAR | `appendVarchar()` | String types |
+| BLOB, BINARY, VARBINARY | BLOB | `appendBlob()` | Binary data (verified) |
+| JSON | JSON | `appendVarchar()` | Stringified via JSON.stringify() |
+| DATE | DATE | `appendVarchar()` | ISO format (YYYY-MM-DD) |
+| DATETIME, TIMESTAMP | TIMESTAMP | `appendTimestamp()` | Parsed to DuckDBTimestampValue |
+| TIME | TIME | `appendTime()` | Parsed to DuckDBTimeValue |
+| DECIMAL, NUMERIC | DECIMAL | `appendVarchar()` | String representation |
+| BOOLEAN | BOOLEAN | `appendBoolean()` | Boolean type |
+
+### Type Conversion Implementation
+
+```typescript
+private appendValueByType(appender: any, value: any, mysqlType: string): void {
+  const lowerType = mysqlType.toLowerCase();
+  
+  if (value === null || value === undefined) {
+    appender.appendNull();
+    return;
+  }
+  
+  // Integer types
+  if (lowerType.includes('bigint')) {
+    appender.appendBigInt(BigInt(value));
+  } 
+  // TIMESTAMP/DATETIME - use typed method to prevent corruption
+  else if (lowerType.includes('timestamp') || lowerType.includes('datetime')) {
+    const m = String(value).match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?/);
+    if (m) {
+      const micros = m[7] ? parseInt(m[7].padEnd(6, '0').slice(0, 6), 10) : 0;
+      appender.appendTimestamp(DuckDBTimestampValue.fromParts({
+        date: { year: parseInt(m[1], 10), month: parseInt(m[2], 10), day: parseInt(m[3], 10) },
+        time: { hour: parseInt(m[4], 10), min: parseInt(m[5], 10), sec: parseInt(m[6], 10), micros },
+      }));
+    } else {
+      appender.appendNull();
+    }
+  }
+  // ... (see source for full implementation)
+}
+```
+
+<Warning>
+  **Critical**: Use typed append methods (`appendTimestamp`, `appendTime`) for fractional-second values. Using `appendVarchar` for TIMESTAMP/TIME columns with fractional seconds silently corrupts the Appender.
+</Warning>
+
+## Data Sanitization
+
+### Worker Pool Offloading
+
+Sanitization is CPU-intensive and offloaded to worker threads:
+
+```typescript
+const pool = WorkerPool.getInstance();
+const sanitizedRows = await pool.sanitizeBatch(batch, columns, columnTypes);
+```
+
+### Invalid Value Handling
+
+```typescript
+private sanitizeValue(value: any, columnType: string): any {
+  // Handle MySQL invalid timestamps
+  if (value === '0000-00-00 00:00:00' || value === '0000-00-00') {
+    return null;
+  }
+  
+  // Handle invalid TIME values (hours >= 24)
+  if (lowerType.includes('time')) {
+    const m = value.match(/^(\d+):(\d+):(\d+)/);
+    if (m && parseInt(m[1], 10) >= 24) {
+      logger.warn(`Invalid time value "${value}" (hours >= 24) - converting to NULL`);
+      return null;
+    }
+  }
+  
+  // JSON stringification
+  if (lowerType.includes('json')) {
+    return typeof value === 'string' ? value : JSON.stringify(value);
+  }
+  
+  return value;
+}
+```
+
+## Memory Management
+
+### Periodic Flushing
+
+Flush appender every 5,000 records (configurable via `APPENDER_FLUSH_INTERVAL`):
+
+```typescript
+if (recordsProcessed - lastFlushed >= FLUSH_INTERVAL) {
+  logger.info(`Flushing appender at ${recordsProcessed} records to free memory...`);
+  appender.flushSync();
+  lastFlushed = recordsProcessed;
+  
+  // Force GC if available
+  if (global.gc) {
+    global.gc();
+  }
+}
+```
+
+### Progress Logging
+
+Log progress for large tables (every 10,000 records):
+
+```typescript
+const percent = Math.min((recordsProcessed / totalRecords) * 100, 100).toFixed(1);
+const memUsage = process.memoryUsage();
+const heapUsedMB = (memUsage.heapUsed / 1024 / 1024).toFixed(1);
+const heapTotalMB = (memUsage.heapTotal / 1024 / 1024).toFixed(1);
+
+logger.info(`${tableName}: ${recordsProcessed}/${totalRecords} (${percent}%) | Memory: ${heapUsedMB}/${heapTotalMB} MB`);
+```
+
+<Info>
+  Memory usage remains flat regardless of table size thanks to streaming batches and periodic flushing. A 60M row table processes with &lt;500MB memory footprint.
+</Info>
+
+## Automatic Fallback
+
+If Appender fails for any reason, automatically fall back to INSERT:
+
+```typescript
+try {
+  return await this.syncTableSequentialWithAppender(tableName);
+} catch (error) {
+  logger.warn(`Appender failed, falling back to INSERT method:`, error);
+  return await this.syncTableSequential(tableName);
+}
+```
+
+## Watermark Management
+
+After successful sync, update watermark for incremental sync:
+
+```typescript
+const primaryKeyColumn = await this.detectPrimaryKeyColumn(tableName, schema);
+const maxResult = await this.duckdb.execute(
+  `SELECT MAX(${this.q(primaryKeyColumn)}) as max_id FROM ${this.q(tableName)}`
+);
+
+await this.updateWatermark(tableName, {
+  lastProcessedId: maxResult[0]?.max_id,
+  lastProcessedTimestamp: new Date(),
+  primaryKeyColumn: primaryKeyColumn,
+  timestampColumn: await this.detectTimestampColumn(tableName, schema)
+});
+```
+
+## Real-World Performance
+
+### Case Study: 60M Records
+
+| Metric | Value |
+|--------|-------|
+| Total Records | 60,000,000 |
+| Sync Time | ~16 minutes |
+| Average Speed | 62,500 rows/sec |
+| Memory Usage | &lt;500 MB |
+| CPU Usage | 40-60% (4 cores) |
+
+<Note>
+  Traditional INSERT would take ~1.6 hours for the same dataset. The Appender API reduces sync time by **83%**.
+</Note>
+
+## Configuration
+
+### Environment Variables
+
+```bash
+# Batch size for MySQL streaming (default: 1000)
+BATCH_SIZE=1000
+
+# Flush interval for Appender (default: 5000)
+APPENDER_FLUSH_INTERVAL=5000
+
+# Insert batch size for fallback INSERT (default: 5000)
+INSERT_BATCH_SIZE=5000
+```
+
+### Tuning Tips
+
+<CardGroup cols={2}>
+  <Card title="BATCH_SIZE" icon="database">
+    Larger batches reduce MySQL round-trips but increase memory
+  </Card>
+  <Card title="APPENDER_FLUSH_INTERVAL" icon="faucet">
+    Lower intervals reduce memory, higher improves speed
+  </Card>
+  <Card title="Worker Threads" icon="users">
+    Match CPU cores for optimal sanitization performance
+  </Card>
+  <Card title="Connection Pools" icon="plug">
+    Increase pools for multi-database setups
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Sync Modes" href="/concepts/sync-modes" icon="rotate">
+    Learn about full sync, incremental sync, and CDC
+  </Card>
+  <Card title="Architecture" href="/concepts/architecture" icon="sitemap">
+    Understand the complete system architecture
+  </Card>
+</CardGroup>

@@ -1,0 +1,408 @@
+---
+title: 'Synchronization'
+description: 'MySQL to DuckDB synchronization endpoints'
+---
+
+## Overview
+
+Duckling provides atomic, ACID-compliant synchronization from MySQL to DuckDB using the Sequential Appender architecture. All sync endpoints support multi-database operations via the `?db={database_id}` query parameter.
+
+## Sync Types
+
+- **Full Sync** - Complete data refresh with atomic transactions
+- **Incremental Sync** - Watermark-based delta updates (only changed records)
+- **Single Table Sync** - Sync individual tables on-demand
+
+## Endpoints
+
+### POST /sync/full
+
+Trigger a full synchronization from MySQL to DuckDB.
+
+**Authentication:** Required
+
+**Query Parameters:**
+<ParamField query="db" type="string">
+  Database ID to sync (defaults to `default` if omitted)
+</ParamField>
+
+**Request Example:**
+```bash
+curl -X POST 'http://localhost:3001/sync/full?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "totalTables": 181,
+  "successfulTables": 181,
+  "failedTables": 0,
+  "totalRecords": 1234567,
+  "totalDuration": 45000,
+  "errors": [],
+  "syncDetails": {
+    "snapshots": 181,
+    "microBatches": 0,
+    "appendOperations": 12346
+  }
+}
+```
+
+<ResponseField name="totalTables" type="number">
+  Total number of tables processed
+</ResponseField>
+
+<ResponseField name="successfulTables" type="number">
+  Number of tables synced successfully
+</ResponseField>
+
+<ResponseField name="failedTables" type="number">
+  Number of tables that failed to sync
+</ResponseField>
+
+<ResponseField name="totalRecords" type="number">
+  Total number of records synchronized
+</ResponseField>
+
+<ResponseField name="totalDuration" type="number">
+  Total sync duration in milliseconds
+</ResponseField>
+
+<ResponseField name="errors" type="array">
+  List of error messages (if any)
+</ResponseField>
+
+---
+
+### POST /sync/incremental
+
+Trigger an incremental synchronization using watermark-based tracking.
+
+**Authentication:** Required
+
+**Query Parameters:**
+<ParamField query="db" type="string">
+  Database ID to sync (defaults to `default` if omitted)
+</ParamField>
+
+**Request Example:**
+```bash
+curl -X POST 'http://localhost:3001/sync/incremental?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "totalTables": 181,
+  "successfulTables": 181,
+  "failedTables": 0,
+  "totalRecords": 1523,
+  "totalDuration": 2300,
+  "errors": [],
+  "syncDetails": {
+    "snapshots": 0,
+    "microBatches": 15,
+    "appendOperations": 1523
+  }
+}
+```
+
+<Info>
+  Incremental sync only processes records changed since the last watermark. This is significantly faster than full sync for tables with infrequent updates.
+</Info>
+
+---
+
+### POST /sync/table/:tableName
+
+Synchronize a specific table from MySQL to DuckDB.
+
+**Authentication:** Required
+
+**Path Parameters:**
+<ParamField path="tableName" type="string" required>
+  Name of the table to synchronize
+</ParamField>
+
+**Query Parameters:**
+<ParamField query="db" type="string">
+  Database ID (defaults to `default` if omitted)
+</ParamField>
+
+**Request Example:**
+```bash
+curl -X POST 'http://localhost:3001/sync/table/User?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "table": "User",
+  "recordsProcessed": 50000,
+  "duration": 3500,
+  "status": "success",
+  "syncType": "snapshot",
+  "partitionInfo": {
+    "partitionDate": "2024-01-20",
+    "fileCount": 5,
+    "totalSize": 5242880
+  }
+}
+```
+
+<ResponseField name="table" type="string">
+  Name of the synchronized table
+</ResponseField>
+
+<ResponseField name="recordsProcessed" type="number">
+  Number of records synchronized
+</ResponseField>
+
+<ResponseField name="duration" type="number">
+  Sync duration in milliseconds
+</ResponseField>
+
+<ResponseField name="status" type="string">
+  Sync status: `success` or `error`
+</ResponseField>
+
+<ResponseField name="syncType" type="string">
+  Type of sync performed: `snapshot`, `micro-batch`, or `append`
+</ResponseField>
+
+---
+
+### GET /sync/status
+
+Get current synchronization status and recent sync history.
+
+**Authentication:** Required
+
+**Query Parameters:**
+<ParamField query="db" type="string">
+  Database ID (defaults to `default` if omitted)
+</ParamField>
+
+**Request Example:**
+```bash
+curl 'http://localhost:3001/sync/status?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "tablesProcessed": 181,
+  "totalRecords": 1234567,
+  "successCount": 181,
+  "errorCount": 0,
+  "watermarks": [
+    {
+      "table": "User",
+      "lastProcessedId": 98765,
+      "lastProcessedTimestamp": "2024-01-20T10:30:00Z"
+    },
+    {
+      "table": "Order",
+      "lastProcessedId": 456789,
+      "lastProcessedTimestamp": "2024-01-20T10:29:45Z"
+    }
+  ],
+  "recentLogs": [
+    {
+      "table": "User",
+      "syncType": "incremental",
+      "recordsProcessed": 1523,
+      "duration": "2.3s",
+      "status": "success"
+    },
+    {
+      "table": "Product",
+      "syncType": "incremental",
+      "recordsProcessed": 89,
+      "duration": "0.8s",
+      "status": "success"
+    }
+  ],
+  "architecture": "sequential-appender"
+}
+```
+
+<ResponseField name="watermarks" type="array">
+  Watermark information for incremental sync tracking
+</ResponseField>
+
+<ResponseField name="watermarks[].table" type="string">
+  Table name
+</ResponseField>
+
+<ResponseField name="watermarks[].lastProcessedId" type="number">
+  Last synchronized record ID
+</ResponseField>
+
+<ResponseField name="watermarks[].lastProcessedTimestamp" type="string">
+  Timestamp of last synchronized record
+</ResponseField>
+
+<ResponseField name="recentLogs" type="array">
+  Recent synchronization logs (last 100 operations)
+</ResponseField>
+
+---
+
+### GET /sync/validate
+
+Validate data integrity by comparing record counts between MySQL and DuckDB.
+
+**Authentication:** Required
+
+**Query Parameters:**
+<ParamField query="db" type="string">
+  Database ID (defaults to `default` if omitted)
+</ParamField>
+
+**Request Example:**
+```bash
+curl 'http://localhost:3001/sync/validate?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "totalTables": 181,
+  "matchedTables": 181,
+  "mismatchedTables": 0,
+  "missingInDuckDB": [],
+  "missingInMySQL": [],
+  "discrepancies": [],
+  "summary": {
+    "mysqlTotalRecords": 1234567,
+    "duckdbTotalRecords": 1234567,
+    "accuracy": 100
+  }
+}
+```
+
+<ResponseField name="matchedTables" type="number">
+  Number of tables with matching record counts
+</ResponseField>
+
+<ResponseField name="mismatchedTables" type="number">
+  Number of tables with count discrepancies
+</ResponseField>
+
+<ResponseField name="discrepancies" type="array">
+  List of tables with count mismatches
+</ResponseField>
+
+<ResponseField name="summary.accuracy" type="number">
+  Overall sync accuracy percentage
+</ResponseField>
+
+<Warning>
+  The validate endpoint performs COUNT(*) queries on all tables in both MySQL and DuckDB. This can be slow for large databases.
+</Warning>
+
+---
+
+### DELETE /sync/clear-all
+
+Clear all DuckDB data and reinitialize the database.
+
+**Authentication:** Required
+
+**Query Parameters:**
+<ParamField query="db" type="string">
+  Database ID (defaults to `default` if omitted)
+</ParamField>
+
+**Request Example:**
+```bash
+curl -X DELETE 'http://localhost:3001/sync/clear-all?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "All DuckDB data cleared successfully. Database reinitialized.",
+  "tablesDropped": 181
+}
+```
+
+<Warning>
+  This operation is **irreversible** and will delete all replicated data. A full sync will be required to restore data.
+</Warning>
+
+---
+
+## Watermark-Based Incremental Sync
+
+Duckling uses watermark tracking to efficiently synchronize only changed data.
+
+### How It Works
+
+1. **Timestamp Detection** - Automatically detects the appropriate timestamp column:
+   - Priority 1: `updatedAt`, `updated_at`, `modifiedAt`, `modified_at`
+   - Priority 2: `createdAt`, `created_at`
+   - Priority 3: `timestamp`
+
+2. **Watermark Storage** - Stores the last processed timestamp for each table
+
+3. **Delta Queries** - Fetches only records changed since the watermark:
+   ```sql
+   SELECT * FROM TableName 
+   WHERE updatedAt >= '2024-01-20 10:00:00'
+   ```
+
+4. **Upsert Behavior** - Uses `INSERT OR REPLACE` to handle updates:
+   - New records are inserted
+   - Modified records replace existing rows by primary key
+   - No duplicates (primary key constraint enforced)
+
+### Example Sync Flow
+
+```bash
+# Initial full sync
+curl -X POST 'http://localhost:3001/sync/full?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+# Result: 1,234,567 records synced in 45 seconds
+
+# Incremental sync (15 minutes later)
+curl -X POST 'http://localhost:3001/sync/incremental?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+# Result: 1,523 records synced in 2.3 seconds
+```
+
+<Info>
+  Incremental sync is **650x faster** than full sync for databases with low update rates.
+</Info>
+
+## Error Handling
+
+**409 Conflict - Sync Already Running:**
+```json
+{
+  "error": "Sync skipped: Another sync operation is already in progress"
+}
+```
+
+**500 Internal Server Error:**
+```json
+{
+  "error": "Sync failed: Connection to MySQL timed out"
+}
+```
+
+## Best Practices
+
+1. **Use Incremental Sync** - Run incremental sync every 15 minutes via automation
+2. **Schedule Full Sync** - Run full sync daily during off-peak hours
+3. **Monitor Logs** - Check `/sync/status` for failed tables and errors
+4. **Validate Periodically** - Run `/sync/validate` weekly to ensure data integrity
+5. **Clear Carefully** - Only use `/sync/clear-all` when absolutely necessary

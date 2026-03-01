@@ -1,0 +1,520 @@
+---
+title: 'Backup & Restore Operations'
+description: 'Automated backups, S3 cloud storage, and disaster recovery for Duckling'
+---
+
+## Overview
+
+Duckling provides automated local backups and optional S3 cloud backups with encryption. All backup features are **enabled by default** for zero-manual-intervention operations.
+
+## Automatic Local Backups
+
+### Default Behavior
+
+Local backups run automatically:
+
+- **Backup Interval**: Every 24 hours (`BACKUP_INTERVAL_HOURS=24`)
+- **Auto-Backup**: Enabled by default (`AUTO_BACKUP=true`)
+- **Retention**: 7 days (`BACKUP_RETENTION_DAYS=7`)
+- **Location**: `data/backups/`
+
+<Info>
+Backups are skipped during server startup to speed up initialization. The first backup runs after 24 hours.
+</Info>
+
+### What Gets Backed Up
+
+Each backup includes:
+
+1. **DuckDB database file** (`.db` file)
+2. **Metadata directory** (configuration and state)
+
+**Backup Structure:**
+```
+data/backups/
+└── backup-{database_id}-2026-03-01T10-30-00-000Z/
+    ├── duckling-{database_id}.db
+    └── metadata/
+```
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTO_BACKUP` | `true` | Enable automatic backups |
+| `BACKUP_INTERVAL_HOURS` | `24` | Hours between backups |
+| `BACKUP_RETENTION_DAYS` | `7` | Days to retain backups |
+| `BACKUP_PATH` | `data/backups` | Backup directory |
+
+### Disabling Automatic Backups
+
+```bash
+AUTO_BACKUP=false
+```
+
+<Warning>
+Disabling automatic backups removes your primary disaster recovery mechanism. Only disable if using external backup solutions.
+</Warning>
+
+## Manual Backup Operations
+
+### Trigger Manual Backup
+
+**API:**
+```bash
+curl -X POST http://localhost:3001/api/automation/backup?db=your-database-id \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Backup completed",
+  "path": "data/backups/backup-lms-2026-03-01T10-30-00-000Z",
+  "s3Upload": true
+}
+```
+
+<Note>
+Manual backups also upload to S3 if S3 is configured and enabled for the database.
+</Note>
+
+### Restore from Local Backup
+
+**API:**
+```bash
+curl -X POST http://localhost:3001/api/automation/restore?db=your-database-id \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+```
+
+This restores from the **latest local backup**.
+
+<Warning>
+Restore operations replace the current database file. Ensure you have a recent backup before proceeding. The server must be restarted after restore.
+</Warning>
+
+## S3 Cloud Backups
+
+### Why S3 Backups?
+
+Production DuckDB replicas can reach **200 GB+** (or **500 GB+**). S3 backups enable:
+
+- **Fast disaster recovery** (download pre-built `.db` file)
+- **Off-site storage** (protection from server failures)
+- **Long-term retention** (independent of local disk space)
+- **Encrypted storage** (client-side or server-side encryption)
+
+<Info>
+Restoring a 200 GB database from S3 takes minutes, compared to hours for a full MySQL resync.
+</Info>
+
+### S3 Configuration
+
+S3 configuration is **per-database** and stored in `databases.json`.
+
+**Configure via API:**
+```bash
+curl -X PUT http://localhost:3001/api/databases/{database-id}/s3 \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "enabled": true,
+    "bucket": "my-duckling-backups",
+    "region": "us-east-1",
+    "accessKeyId": "AKIAIOSFODNN7EXAMPLE",
+    "secretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    "pathPrefix": "lms/",
+    "encryption": "client-aes256",
+    "encryptionKey": "a3f1c2d4e5b6a7f8...",
+    "s3BackupIntervalHours": 24,
+    "s3BackupRetentionDays": 30
+  }'
+```
+
+### S3 Configuration Schema
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `enabled` | boolean | Yes | Enable S3 backups |
+| `bucket` | string | Yes | S3 bucket name |
+| `region` | string | Yes | AWS region (e.g., `us-east-1`) |
+| `accessKeyId` | string | Yes | AWS access key ID |
+| `secretAccessKey` | string | Yes | AWS secret access key (masked in API responses) |
+| `endpoint` | string | No | Custom endpoint for S3-compatible providers |
+| `forcePathStyle` | boolean | No | Use path-style URLs (for MinIO, etc.) |
+| `pathPrefix` | string | No | S3 key prefix (defaults to `{database_id}/`) |
+| `encryption` | string | No | Encryption mode: `none`, `sse-s3`, `sse-kms`, `client-aes256` |
+| `kmsKeyId` | string | No | KMS key ARN (for `sse-kms` mode) |
+| `encryptionKey` | string | No | 64-char hex key (for `client-aes256` mode) |
+| `s3BackupIntervalHours` | number | No | Hours between S3 backups (independent schedule) |
+| `s3BackupRetentionDays` | number | No | Days to retain S3 backups (auto-cleanup) |
+
+### S3-Compatible Providers
+
+Duckling supports S3-compatible storage providers:
+
+| Provider | `endpoint` | `forcePathStyle` |
+|----------|-----------|------------------|
+| AWS S3 | _(leave blank)_ | `false` |
+| Cloudflare R2 | `https://<account_id>.r2.cloudflarestorage.com` | `false` |
+| Backblaze B2 | `https://s3.<region>.backblazeb2.com` | `false` |
+| DigitalOcean Spaces | `https://<region>.digitaloceanspaces.com` | `false` |
+| MinIO (self-hosted) | `https://minio.internal:9000` | `true` |
+
+### Encryption Options
+
+Choose encryption based on your threat model:
+
+| Mode | Key Storage | Protects Against | Overhead |
+|------|-------------|------------------|----------|
+| `none` | — | Nothing | Zero |
+| `sse-s3` | AWS managed | Physical media theft | Zero |
+| `sse-kms` | AWS KMS | Physical media theft + audit trail | ~1 ms/request |
+| `client-aes256` | Your server (`databases.json`) | Compromised AWS credentials, bucket misconfiguration | Streaming (no memory spike) |
+
+**Recommended:** `client-aes256` for production with sensitive data.
+
+### Generate Encryption Key
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+Output (example):
+```
+a3f1c2d4e5b6a7f8c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4
+```
+
+<Warning>
+Store encryption keys securely. Loss of the encryption key means permanent loss of backup data.
+</Warning>
+
+### Client-Side Encryption Format
+
+Backups use **AES-256-CTR** encryption:
+
+```
+[16 bytes IV][Encrypted data]
+```
+
+**HMAC Verification:**
+- Companion `.mac` file stores `HMAC-SHA256(key || IV || ciphertext)`
+- Verified on restore to detect tampering
+- Automatically managed (filtered from backup lists)
+
+## S3 Backup Operations
+
+### Automatic S3 Backups
+
+When S3 is enabled:
+
+1. **Dual Schedule**: S3 backups can run on an independent schedule from local backups
+2. **After Local Backup**: S3 upload also triggers after each local backup
+3. **Auto-Cleanup**: Old S3 backups deleted based on retention policy
+
+**Independent S3 Schedule:**
+```json
+{
+  "s3BackupIntervalHours": 12,
+  "s3BackupRetentionDays": 30
+}
+```
+
+This runs S3 backups every 12 hours (independent of the 24-hour local backup schedule).
+
+### Manual S3 Backup
+
+```bash
+curl -X POST "http://localhost:3001/api/backups/s3?db=your-database-id" \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "key": "lms/duckling-lms-2026-03-01T10-30-00-000Z.db",
+  "size": 214748364800,
+  "encrypted": true
+}
+```
+
+### List S3 Backups
+
+```bash
+curl "http://localhost:3001/api/backups?db=your-database-id" \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+```
+
+**Response:**
+```json
+{
+  "s3": [
+    {
+      "key": "lms/duckling-lms-2026-03-01T10-30-00-000Z.db",
+      "size": 214748364800,
+      "lastModified": "2026-03-01T10:30:00.000Z",
+      "encrypted": true
+    }
+  ],
+  "local": [
+    {
+      "path": "data/backups/backup-lms-2026-03-01T08-00-00-000Z",
+      "size": 214748364800,
+      "created": "2026-03-01T08:00:00.000Z"
+    }
+  ]
+}
+```
+
+### Restore from S3
+
+```bash
+curl -X POST "http://localhost:3001/api/backups/s3/restore?db=your-database-id" \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "key": "lms/duckling-lms-2026-03-01T10-30-00-000Z.db"
+  }'
+```
+
+**Process:**
+<Steps>
+  <Step title="Download Encrypted Backup">
+    Downloads backup to temporary file on server
+  </Step>
+  
+  <Step title="Verify HMAC">
+    Validates backup integrity using HMAC signature
+  </Step>
+  
+  <Step title="Decrypt and Replace">
+    Streams decryption and replaces current database file
+  </Step>
+  
+  <Step title="Cleanup">
+    Removes temporary files
+  </Step>
+</Steps>
+
+<Warning>
+**Disk Space Requirement:** Restoring a 500 GB encrypted backup requires ~500 GB temporary disk space during the restore process.
+</Warning>
+
+### Test S3 Connection
+
+```bash
+curl -X POST "http://localhost:3001/api/databases/{database-id}/s3/test" \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "S3 connection successful",
+  "bucket": "my-duckling-backups",
+  "region": "us-east-1"
+}
+```
+
+## Backup Strategy
+
+### Recommended Configuration
+
+**Local Backups:**
+- Interval: 24 hours
+- Retention: 7 days
+- Purpose: Fast local recovery
+
+**S3 Backups:**
+- Interval: 24 hours (or 12 hours for critical databases)
+- Retention: 30-90 days
+- Encryption: `client-aes256`
+- Purpose: Disaster recovery, long-term retention
+
+### 3-2-1 Backup Rule
+
+Follow the 3-2-1 rule:
+
+- **3 copies**: Production database + local backup + S3 backup
+- **2 media types**: Local disk + cloud storage
+- **1 off-site**: S3 in different region
+
+<Info>
+For mission-critical databases, configure S3 with cross-region replication or use multiple S3 buckets in different regions.
+</Info>
+
+## Performance Considerations
+
+### Backup Performance
+
+**Local Backup:**
+- Uses `CHECKPOINT` to ensure consistent snapshot
+- File copy operation (very fast)
+- Minimal impact on server performance
+
+**S3 Upload:**
+- Multipart upload (100 MB parts)
+- Streaming encryption (no memory spike)
+- Runs in background (non-blocking)
+
+**Typical Times:**
+- 10 GB database: ~30 seconds local, ~2 minutes S3
+- 100 GB database: ~5 minutes local, ~20 minutes S3
+- 500 GB database: ~25 minutes local, ~100 minutes S3
+
+### Restore Performance
+
+**Local Restore:**
+- File copy operation
+- Very fast (seconds to minutes)
+
+**S3 Restore:**
+- Download time depends on bandwidth
+- Streaming decryption
+- Requires temporary disk space
+
+**Typical Times:**
+- 10 GB database: ~1 minute
+- 100 GB database: ~10 minutes
+- 500 GB database: ~50 minutes (1 Gbps network)
+
+<Note>
+S3 restore is still 10-20x faster than full MySQL resync for large databases.
+</Note>
+
+## Multi-Database Backups
+
+Each database has independent backup configuration:
+
+```bash
+# List all databases
+curl http://localhost:3001/api/databases \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+
+# Configure S3 for specific database
+curl -X PUT http://localhost:3001/api/databases/lms/s3 \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true, ...}'
+
+# Trigger backup for specific database
+curl -X POST "http://localhost:3001/api/automation/backup?db=lms" \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+```
+
+<Info>
+Backup schedules are staggered across databases to prevent resource contention. Each database backs up at slightly different times.
+</Info>
+
+## Disaster Recovery
+
+### Recovery Scenarios
+
+**Scenario 1: Corrupted Database File**
+<Steps>
+  <Step title="Restore from Latest Local Backup">
+    ```bash
+    curl -X POST "http://localhost:3001/api/automation/restore?db=your-database-id" \
+      -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+    ```
+  </Step>
+  
+  <Step title="Restart Server">
+    ```bash
+    docker-compose restart duckdb-server
+    ```
+  </Step>
+  
+  <Step title="Run Incremental Sync">
+    Catch up with any missed changes since backup
+  </Step>
+</Steps>
+
+**Scenario 2: Complete Server Loss**
+<Steps>
+  <Step title="Provision New Server">
+    Deploy new Duckling instance
+  </Step>
+  
+  <Step title="Configure Database">
+    Add database configuration with S3 credentials
+  </Step>
+  
+  <Step title="Restore from S3">
+    ```bash
+    curl -X POST "http://localhost:3001/api/backups/s3/restore?db=your-database-id" \
+      -H "Authorization: Bearer ${DUCKLING_API_KEY}" \
+      -d '{"key": "lms/duckling-lms-2026-03-01T10-30-00-000Z.db"}'
+    ```
+  </Step>
+  
+  <Step title="Restart and Sync">
+    Restart server and run incremental sync
+  </Step>
+</Steps>
+
+**Scenario 3: Data Corruption in MySQL**
+<Steps>
+  <Step title="Identify Clean Backup">
+    Find backup from before corruption
+  </Step>
+  
+  <Step title="Restore DuckDB">
+    Restore from clean backup (local or S3)
+  </Step>
+  
+  <Step title="Fix MySQL Source">
+    Repair MySQL corruption
+  </Step>
+  
+  <Step title="Resume Sync">
+    Resume normal sync operations
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+### Backup Failed
+
+Check automation logs:
+```bash
+docker-compose logs -f duckdb-server | grep -i backup
+```
+
+Common issues:
+- Insufficient disk space
+- Backup directory permissions
+- Sync in progress (backups skip if sync is running)
+
+### S3 Upload Failed
+
+Test S3 connection:
+```bash
+curl -X POST "http://localhost:3001/api/databases/{database-id}/s3/test" \
+  -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+```
+
+Common issues:
+- Invalid AWS credentials
+- Incorrect bucket name or region
+- Network connectivity issues
+- Insufficient S3 permissions (requires `s3:PutObject`, `s3:GetObject`, `s3:ListBucket`)
+
+### Restore Failed
+
+Check error message in API response.
+
+Common issues:
+- Insufficient disk space for temporary files
+- Invalid encryption key
+- Corrupted backup file
+- HMAC verification failed (backup tampered or encryption key mismatch)
+
+## Next Steps
+
+- [Synchronization](/operations/synchronization) - Configure sync operations
+- [Monitoring](/operations/monitoring) - Set up health checks and metrics
+- [Performance Tuning](/operations/performance-tuning) - Optimize backup performance

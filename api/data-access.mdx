@@ -1,0 +1,445 @@
+---
+title: 'Data Access'
+description: 'Query execution and table data endpoints'
+---
+
+## Overview
+
+Access your synchronized data through high-performance DuckDB queries. All endpoints support multi-database access via the `?db={database_id}` query parameter.
+
+## Endpoints
+
+### POST /api/query
+
+Execute SQL queries on DuckDB or MySQL.
+
+**Authentication:** Required
+
+**Query Parameters:**
+<ParamField query="db" type="string">
+  Database ID to query (defaults to `default` if omitted)
+</ParamField>
+
+**Request Body:**
+<ParamField body="sql" type="string" required>
+  SQL query to execute
+</ParamField>
+
+<ParamField body="params" type="array">
+  Optional query parameters for parameterized queries
+</ParamField>
+
+<ParamField body="database" type="string" default="duckdb">
+  Target database: `duckdb` or `mysql`
+</ParamField>
+
+**Request Example:**
+```bash
+curl -X POST 'http://localhost:3001/api/query?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sql": "SELECT * FROM User WHERE age > 25 LIMIT 10"
+  }'
+```
+
+**Parameterized Query Example:**
+```bash
+curl -X POST 'http://localhost:3001/api/query?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sql": "SELECT * FROM User WHERE refId = ? LIMIT 10",
+    "params": [123]
+  }'
+```
+
+**Response:**
+```json
+{
+  "result": [
+    {
+      "refId": "123",
+      "name": "John Doe",
+      "email": "john@example.com",
+      "age": 30
+    },
+    {
+      "refId": "456",
+      "name": "Jane Smith",
+      "email": "jane@example.com",
+      "age": 28
+    }
+  ],
+  "database": "duckdb",
+  "architecture": "sequential-appender"
+}
+```
+
+<ResponseField name="result" type="array">
+  Query results as array of objects
+</ResponseField>
+
+<ResponseField name="database" type="string">
+  Database engine used: `duckdb` or `mysql`
+</ResponseField>
+
+<ResponseField name="architecture" type="string">
+  Architecture mode used for the query
+</ResponseField>
+
+<Warning>
+  MySQL queries are **read-only**. Only SELECT statements are allowed to prevent accidental data modification.
+</Warning>
+
+---
+
+### GET /api/tables
+
+List all replicated tables in DuckDB.
+
+**Authentication:** Required
+
+**Query Parameters:**
+<ParamField query="db" type="string">
+  Database ID (defaults to `default` if omitted)
+</ParamField>
+
+**Request Example:**
+```bash
+curl 'http://localhost:3001/api/tables?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+[
+  "User",
+  "Product",
+  "Order",
+  "Customer",
+  "Invoice"
+]
+```
+
+---
+
+### GET /api/tables/:name/schema
+
+Get table schema information (column names and types).
+
+**Authentication:** Required
+
+**Path Parameters:**
+<ParamField path="name" type="string" required>
+  Table name
+</ParamField>
+
+**Query Parameters:**
+<ParamField query="db" type="string">
+  Database ID (defaults to `default` if omitted)
+</ParamField>
+
+**Request Example:**
+```bash
+curl 'http://localhost:3001/api/tables/User/schema?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "columns": [
+    {
+      "column_name": "refId",
+      "column_type": "VARCHAR",
+      "null": "NO",
+      "key": "PRI",
+      "default_value": null,
+      "extra": ""
+    },
+    {
+      "column_name": "name",
+      "column_type": "VARCHAR",
+      "null": "YES",
+      "key": "",
+      "default_value": null,
+      "extra": ""
+    },
+    {
+      "column_name": "email",
+      "column_type": "VARCHAR",
+      "null": "YES",
+      "key": "",
+      "default_value": null,
+      "extra": ""
+    },
+    {
+      "column_name": "age",
+      "column_type": "INTEGER",
+      "null": "YES",
+      "key": "",
+      "default_value": "0",
+      "extra": ""
+    }
+  ]
+}
+```
+
+<ResponseField name="columns" type="array">
+  Array of column definitions
+</ResponseField>
+
+<ResponseField name="columns[].column_name" type="string">
+  Column name
+</ResponseField>
+
+<ResponseField name="columns[].column_type" type="string">
+  DuckDB data type (VARCHAR, INTEGER, BIGINT, DECIMAL, etc.)
+</ResponseField>
+
+<ResponseField name="columns[].null" type="string">
+  Whether column allows NULL values: `YES` or `NO`
+</ResponseField>
+
+<ResponseField name="columns[].key" type="string">
+  Primary key indicator: `PRI` for primary key columns
+</ResponseField>
+
+---
+
+### GET /api/tables/:name/data
+
+Get paginated table data.
+
+**Authentication:** Required
+
+**Path Parameters:**
+<ParamField path="name" type="string" required>
+  Table name
+</ParamField>
+
+**Query Parameters:**
+<ParamField query="db" type="string">
+  Database ID (defaults to `default` if omitted)
+</ParamField>
+
+<ParamField query="limit" type="number" default="100">
+  Number of rows to return (max: 10,000)
+</ParamField>
+
+<ParamField query="offset" type="number" default="0">
+  Number of rows to skip for pagination
+</ParamField>
+
+**Request Example:**
+```bash
+curl 'http://localhost:3001/api/tables/User/data?db=lms&limit=10&offset=0' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+[
+  {
+    "refId": "123",
+    "name": "John Doe",
+    "email": "john@example.com",
+    "age": 30,
+    "createdAt": "2024-01-15T10:00:00Z"
+  },
+  {
+    "refId": "456",
+    "name": "Jane Smith",
+    "email": "jane@example.com",
+    "age": 28,
+    "createdAt": "2024-01-16T11:30:00Z"
+  }
+]
+```
+
+<Info>
+  Use pagination to retrieve large datasets efficiently. The maximum limit is 10,000 rows per request.
+</Info>
+
+---
+
+### GET /api/tables/:name/count
+
+Get total row count for a table.
+
+**Authentication:** Required
+
+**Path Parameters:**
+<ParamField path="name" type="string" required>
+  Table name
+</ParamField>
+
+**Query Parameters:**
+<ParamField query="db" type="string">
+  Database ID (defaults to `default` if omitted)
+</ParamField>
+
+**Request Example:**
+```bash
+curl 'http://localhost:3001/api/tables/User/count?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "count": 50000
+}
+```
+
+---
+
+### GET /api/tables/counts/all
+
+Get row counts for all tables in parallel.
+
+**Authentication:** Required
+
+**Query Parameters:**
+<ParamField query="db" type="string">
+  Database ID (defaults to `default` if omitted)
+</ParamField>
+
+**Request Example:**
+```bash
+curl 'http://localhost:3001/api/tables/counts/all?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "User": 50000,
+  "Product": 10000,
+  "Order": 150000,
+  "Customer": 25000,
+  "Invoice": 120000
+}
+```
+
+<Info>
+  This endpoint executes COUNT queries in parallel for optimal performance.
+</Info>
+
+---
+
+## Query Examples
+
+### Star Schema Joins
+
+```bash
+curl -X POST 'http://localhost:3001/api/query?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sql": "SELECT c.region, date_trunc('"'"'day'"'"', o.order_date) AS day, SUM(o.amount) AS revenue FROM orders o JOIN customers c ON o.customer_id = c.customer_id WHERE o.order_date >= CURRENT_DATE - INTERVAL 7 DAY GROUP BY c.region, day ORDER BY day DESC"
+  }'
+```
+
+**Performance:** ~200ms (was 2-5s on MySQL)
+
+### Time-Range Queries
+
+```bash
+curl -X POST 'http://localhost:3001/api/query?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sql": "SELECT COUNT(*), AVG(amount) FROM orders WHERE order_date BETWEEN '"'"'2024-01-15'"'"' AND '"'"'2024-01-16'"'"'"
+  }'
+```
+
+**Performance:** ~50ms (was 1-2s on MySQL)
+
+### Analytical Aggregations
+
+```bash
+curl -X POST 'http://localhost:3001/api/query?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sql": "SELECT product_category, COUNT(*) as order_count, SUM(amount) as total_revenue FROM orders GROUP BY product_category"
+  }'
+```
+
+### Window Functions
+
+```bash
+curl -X POST 'http://localhost:3001/api/query?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sql": "SELECT refId, name, email, ROW_NUMBER() OVER (PARTITION BY boardId ORDER BY createdAt) as rank FROM User"
+  }'
+```
+
+### Time-Series Analytics
+
+```bash
+curl -X POST 'http://localhost:3001/api/query?db=lms' \
+  -H "Authorization: Bearer $DUCKLING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sql": "SELECT DATE_TRUNC('"'"'day'"'"', createdAt) as date, COUNT(*) as daily_signups FROM User WHERE createdAt >= CURRENT_DATE - INTERVAL '"'"'30 days'"'"' GROUP BY date ORDER BY date"
+  }'
+```
+
+---
+
+## Performance Benefits
+
+<CardGroup cols={2}>
+  <Card title="5-10x Faster Queries" icon="bolt">
+    DuckDB's columnar storage delivers 5-10x better query performance compared to MySQL for analytical workloads.
+  </Card>
+  <Card title="Column Pruning" icon="filter">
+    Only scans needed columns, reducing I/O and memory usage.
+  </Card>
+  <Card title="Compressed Storage" icon="compress">
+    Built-in compression reduces storage footprint by 60-94%.
+  </Card>
+  <Card title="In-Process Queries" icon="rocket">
+    No network overhead - DuckDB runs in the same process as your application.
+  </Card>
+</CardGroup>
+
+---
+
+## Error Handling
+
+**400 Bad Request - Missing SQL:**
+```json
+{
+  "error": "SQL query is required"
+}
+```
+
+**400 Bad Request - Invalid Identifier:**
+```json
+{
+  "error": "Invalid identifier: table_name"
+}
+```
+
+**500 Internal Server Error:**
+```json
+{
+  "error": "Query execution failed: no such table: InvalidTable"
+}
+```
+
+---
+
+## Best Practices
+
+1. **Use Parameterized Queries** - Prevent SQL injection with parameter binding
+2. **Limit Result Sets** - Use `LIMIT` clauses to avoid memory issues
+3. **Index Primary Keys** - Ensure tables have primary keys for optimal performance
+4. **Use DuckDB for Analytics** - Route analytical queries to DuckDB, transactional queries to MySQL
+5. **Monitor Query Performance** - Check `/metrics` endpoint for slow queries

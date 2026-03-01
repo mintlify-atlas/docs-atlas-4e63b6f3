@@ -1,0 +1,350 @@
+---
+title: "CDC with MySQL Binlog Streaming"
+description: "Real-time data replication using MySQL binary log (binlog) streaming for zero-lag synchronization"
+---
+
+# CDC with MySQL Binlog Streaming
+
+Duckling's CDC (Change Data Capture) service provides real-time MySQL to DuckDB replication using binlog streaming. This enables near-zero lag replication for mission-critical applications that require live data.
+
+## Overview
+
+The CDC service uses the `@vlasky/zongji` library to parse MySQL binary logs and capture INSERT, UPDATE, and DELETE operations in real-time. Changes are applied to DuckDB immediately with automatic recovery and position tracking.
+
+**Key Features:**
+- Real-time replication (INSERT, UPDATE, DELETE)
+- Binlog position tracking for resume capability
+- Auto-reconnect on disconnect (up to 10 attempts)
+- Multi-database support
+- Graceful error handling with exponential backoff
+- Backpressure control to prevent memory overflow
+
+## Architecture
+
+```text
+MySQL Binary Log → ZongJi Parser → Event Queue → DuckDB
+                        ↓              ↓            ↓
+                   Parse Events   Serialize    ACID Writes
+                   (ROW format)   Processing   (INSERT OR REPLACE)
+                        ↓
+                  Position Tracking
+                  (Auto-resume)
+```
+
+## Environment Variables
+
+<ParamField path="CDC_ENABLED" type="boolean" default="false">
+  Enable CDC binlog streaming for real-time replication
+</ParamField>
+
+<ParamField path="CDC_MAX_QUEUE_SIZE" type="number" default="10000">
+  Maximum event queue size before applying backpressure (pauses binlog stream)
+</ParamField>
+
+<ParamField path="CDC_SSL_REJECT_UNAUTHORIZED" type="boolean" default="true">
+  Reject unauthorized SSL certificates. Set to `false` for self-signed certs (DigitalOcean Managed MySQL)
+</ParamField>
+
+## Configuration
+
+CDC is configured **per database** using the MySQL connection string:
+
+```json
+{
+  "id": "production",
+  "name": "Production Database",
+  "mysqlConnectionString": "mysql://user:pass@host:3306/dbname",
+  "duckdbPath": "data/production.db",
+  "cdc": {
+    "enabled": true,
+    "includeTables": ["users", "orders", "products"],
+    "excludeTables": ["_sessions", "migrations"]
+  }
+}
+```
+
+<Note>
+  **SSL Support**: CDC automatically enables SSL for DigitalOcean Managed MySQL and other providers. Use `CDC_SSL_REJECT_UNAUTHORIZED=false` for self-signed certificates.
+</Note>
+
+## Binlog Position Tracking
+
+The CDC service tracks binlog positions in DuckDB to enable resume capability after restarts or failures:
+
+```sql
+CREATE TABLE cdc_binlog_position (
+  database_id VARCHAR PRIMARY KEY,
+  filename VARCHAR NOT NULL,
+  position BIGINT NOT NULL,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+**Position Saving Strategy:**
+- Every 100 events processed
+- After each row event (INSERT, UPDATE, DELETE)
+- Only after successful DuckDB transaction
+
+<CodeGroup>
+```bash Binlog Position Query
+# Check current binlog position for a database
+curl http://localhost:3001/api/query?db=production \
+  -H "Authorization: Bearer $DUCKLING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sql": "SELECT * FROM cdc_binlog_position WHERE database_id = 'production'"
+  }'
+```
+
+```json Response
+[
+  {
+    "database_id": "production",
+    "filename": "mysql-bin.000042",
+    "position": 89472831,
+    "updated_at": "2025-03-01T14:32:11.000Z"
+  }
+]
+```
+</CodeGroup>
+
+## Event Processing
+
+### Supported Event Types
+
+CDC captures the following MySQL binlog events:
+
+| Event Type | Description | DuckDB Operation |
+|------------|-------------|------------------|
+| `WriteRows` | INSERT statements | `INSERT OR REPLACE` (upsert) |
+| `UpdateRows` | UPDATE statements | `INSERT OR REPLACE` (upsert) |
+| `DeleteRows` | DELETE statements | `DELETE WHERE pk = ?` |
+| `Rotate` | Binlog file rotation | Update position tracking |
+| `TableMap` | Table schema metadata | Cache column mappings |
+
+### Event Queue & Backpressure
+
+The CDC service uses a **serialized event queue** to maintain correct ordering:
+
+1. **Queue Events**: Binlog events are pushed to an in-memory queue
+2. **Serial Processing**: Events processed one-at-a-time to preserve ordering
+3. **Backpressure**: When queue reaches `CDC_MAX_QUEUE_SIZE`, the binlog stream is paused
+4. **Resume**: Stream resumes when queue drains below 50% capacity
+
+<Warning>
+  **High Write Volume**: If your MySQL database has sustained writes exceeding 10,000 ops/sec, increase `CDC_MAX_QUEUE_SIZE` or use batched incremental sync instead of CDC.
+</Warning>
+
+### Table Filtering
+
+Control which tables are replicated:
+
+```typescript
+// Include only specific tables
+"includeTables": ["users", "orders", "products"]
+
+// Exclude specific tables (has priority over includeTables)
+"excludeTables": ["_sessions", "migrations", "cache"]
+
+// Internal tables are always excluded:
+// - cdc_binlog_position
+// - appender_watermarks
+// - sync_log
+```
+
+## Starting CDC
+
+CDC is started automatically when `cdc.enabled: true` in the database configuration:
+
+```typescript
+// API: Create database with CDC enabled
+POST /api/databases
+{
+  "name": "Production",
+  "mysqlConnectionString": "mysql://...",
+  "duckdbPath": "data/production.db",
+  "cdc": {
+    "enabled": true
+  }
+}
+```
+
+**Startup Behavior:**
+1. Initialize binlog position table
+2. Check for existing position (resume point)
+3. Connect to MySQL binlog stream
+4. If position exists: resume from saved position
+5. If no position: start from current binlog end (`startAtEnd: true`)
+
+## Monitoring CDC
+
+### Statistics API
+
+Get real-time CDC statistics:
+
+```bash
+curl http://localhost:3001/api/cdc/stats?db=production \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "isRunning": true,
+  "connectedAt": "2025-03-01T12:00:00.000Z",
+  "lastEventAt": "2025-03-01T14:32:11.000Z",
+  "eventsProcessed": 482931,
+  "insertsProcessed": 120482,
+  "updatesProcessed": 301249,
+  "deletesProcessed": 61200,
+  "errors": 0,
+  "currentPosition": {
+    "filename": "mysql-bin.000042",
+    "position": 89472831,
+    "timestamp": "2025-03-01T14:32:11.000Z"
+  },
+  "queueSize": 24,
+  "queueHighWaterMark": 1842
+}
+```
+
+### Key Metrics
+
+<ParamField path="queueSize" type="number">
+  Current number of events waiting in queue. Should be < 1000 under normal load.
+</ParamField>
+
+<ParamField path="queueHighWaterMark" type="number">
+  Peak queue size since service started. Helps identify load spikes.
+</ParamField>
+
+<ParamField path="errors" type="number">
+  Total errors encountered. Non-zero indicates issues requiring investigation.
+</ParamField>
+
+## Error Handling & Recovery
+
+### Auto-Reconnect
+
+CDC automatically reconnects on failures:
+
+- **Max Attempts**: 10 reconnection attempts
+- **Backoff Strategy**: Exponential (5s, 10s, 20s, 40s, ...)
+- **Resume Point**: Always resumes from last saved position
+
+### Graceful Shutdown
+
+On service stop, CDC:
+1. Stops accepting new binlog events
+2. Drains event queue (waits for pending events)
+3. Saves final binlog position
+4. Closes MySQL connection
+
+```bash
+# Stop CDC gracefully
+curl -X POST http://localhost:3001/api/cdc/stop?db=production \
+  -H "Authorization: Bearer $DUCKLING_API_KEY"
+```
+
+## MySQL Configuration
+
+### Required MySQL Settings
+
+CDC requires MySQL binlog format to be `ROW`:
+
+```sql
+-- Check current binlog format
+SHOW VARIABLES LIKE 'binlog_format';
+
+-- Set to ROW format (required for CDC)
+SET GLOBAL binlog_format = 'ROW';
+```
+
+<Warning>
+  **Binlog Format**: CDC **only works with ROW format**. STATEMENT or MIXED formats are not supported by the binlog parser.
+</Warning>
+
+### User Permissions
+
+The MySQL user requires these permissions:
+
+```sql
+GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'cdc_user'@'%';
+GRANT SELECT ON database_name.* TO 'cdc_user'@'%';
+FLUSH PRIVILEGES;
+```
+
+## Performance Characteristics
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| Replication Lag | < 100ms | Under normal load |
+| Throughput | ~60,000 ops/sec | With queue backpressure |
+| Memory Usage | ~50-200 MB | Depends on queue size |
+| Disk I/O | Minimal | Only position checkpoints |
+
+## CDC vs Incremental Sync
+
+Choosing between CDC and incremental sync:
+
+| Feature | CDC (Binlog) | Incremental Sync |
+|---------|--------------|------------------|
+| Lag | < 100ms | 15 minutes (default) |
+| Overhead | Continuous connection | Periodic queries |
+| Data Loss Risk | None (position tracked) | None (watermark tracked) |
+| Best For | Real-time dashboards | Analytical workloads |
+| DELETE Support | Yes (immediate) | No (append-only) |
+
+<Note>
+  **Recommendation**: Use CDC for real-time applications (< 1 minute lag), use incremental sync for analytical workloads (15+ minute intervals).
+</Note>
+
+## Troubleshooting
+
+### CDC Not Starting
+
+```bash
+# Check MySQL binlog format
+docker exec duckling-server node scripts/mysql.js \
+  "SHOW VARIABLES LIKE 'binlog_format'"
+
+# Expected: binlog_format = ROW
+```
+
+### High Queue Size
+
+If `queueSize` consistently exceeds 1000:
+
+1. **Increase Queue Limit**: Set `CDC_MAX_QUEUE_SIZE=20000`
+2. **Check DuckDB Performance**: Ensure disk I/O is not bottlenecked
+3. **Filter Tables**: Use `excludeTables` to reduce event volume
+4. **Scale Vertically**: Add more CPU/RAM to handle throughput
+
+### Position Not Saving
+
+Check CDC logs for transaction errors:
+
+```bash
+docker-compose logs -f duckling-server | grep "CDC"
+```
+
+Common causes:
+- DuckDB file locked by another process
+- Disk space exhausted
+- Schema mismatch (table dropped but CDC still tracking)
+
+## Code Reference
+
+CDC implementation: `packages/server/src/services/cdcService.ts`
+
+**Key Classes:**
+- `CDCService` - Main service class (multi-instance per database)
+- `BinlogPosition` - Position tracking interface
+- `CDCStats` - Statistics and monitoring
+
+**Key Methods:**
+- `start()` - Initialize and start binlog streaming (line 619)
+- `handleInsert()` - Process INSERT events (line 374)
+- `handleUpdate()` - Process UPDATE events (line 423)
+- `handleDelete()` - Process DELETE events (line 473)
+- `savePosition()` - Checkpoint binlog position (line 202)

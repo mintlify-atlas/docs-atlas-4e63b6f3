@@ -1,0 +1,495 @@
+---
+title: 'Multi-Database Support'
+description: 'Managing multiple isolated MySQL replicas on a single server'
+---
+
+## Overview
+
+Duckling supports **multiple isolated database replicas** running on a single server instance. Each MySQL source database gets its own DuckDB file, connection pool, and sync service with complete isolation.
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Isolated Replicas" icon="database">
+    Each MySQL source gets its own DuckDB file
+  </Card>
+  <Card title="Zero Cross-Contamination" icon="shield">
+    Separate connection pools per database
+  </Card>
+  <Card title="Unified Monitoring" icon="chart-line">
+    All databases visible in one dashboard
+  </Card>
+  <Card title="Database Selector" icon="hand-pointer">
+    Frontend UI dropdown to switch contexts
+  </Card>
+</CardGroup>
+
+## Configuration
+
+### databases.json Schema
+
+Database configurations are stored in `data/databases.json`:
+
+```json
+[
+  {
+    "id": "lms",
+    "name": "LMS",
+    "mysqlConnectionString": "mysql://user:pass@host:port/chitti_lms?dateStrings=true",
+    "duckdbPath": "data/lms.db",
+    "createdAt": "2025-11-06T18:58:36.480Z",
+    "updatedAt": "2025-11-06T18:58:36.480Z",
+    "s3": {
+      "enabled": true,
+      "bucket": "my-backups",
+      "region": "us-east-1",
+      "accessKeyId": "AKIA...",
+      "secretAccessKey": "...",
+      "pathPrefix": "lms/",
+      "encryption": "client-aes256",
+      "encryptionKey": "a3f1c2d4e5b6a7f8..."
+    }
+  },
+  {
+    "id": "chitti_common",
+    "name": "Common",
+    "mysqlConnectionString": "mysql://user:pass@host:port/chitti_common?dateStrings=true",
+    "duckdbPath": "data/chitti_common.db",
+    "createdAt": "2025-11-06T18:58:36.480Z",
+    "updatedAt": "2025-11-06T18:58:36.480Z"
+  }
+]
+```
+
+<Info>
+  The config file is hot-reloadable. Changes take effect immediately without server restart.
+</Info>
+
+### File Paths
+
+| Environment | Path |
+|-------------|------|
+| **Host** (for editing) | `./data/databases.json` |
+| **Docker Container** | `/app/data/databases.json` |
+| **Volume Mount** | `./data:/app/data` |
+
+## Multi-Instance Architecture
+
+### Singleton Pattern Per Database
+
+Each database gets isolated instances:
+
+```typescript
+// DuckDB connections (one per database)
+class DuckDBConnection {
+  private static instances: Map<string, DuckDBConnection> = new Map();
+  
+  static getInstance(databaseId: string, duckdbPath: string): DuckDBConnection {
+    if (!this.instances.has(databaseId)) {
+      this.instances.set(databaseId, new DuckDBConnection(duckdbPath));
+    }
+    return this.instances.get(databaseId)!;
+  }
+}
+
+// MySQL connections (one per database)
+class MySQLConnection {
+  private static instances: Map<string, MySQLConnection> = new Map();
+  
+  static getInstance(databaseId: string, connectionString: string): MySQLConnection {
+    if (!this.instances.has(databaseId)) {
+      this.instances.set(databaseId, new MySQLConnection(connectionString));
+    }
+    return this.instances.get(databaseId)!;
+  }
+}
+
+// Sync services (one per database)
+class SequentialAppenderService {
+  private static instances: Map<string, SequentialAppenderService> = new Map();
+  
+  static getInstance(
+    databaseId: string, 
+    mysql: MySQLConnection, 
+    duckdb: DuckDBConnection
+  ): SequentialAppenderService {
+    if (!this.instances.has(databaseId)) {
+      this.instances.set(
+        databaseId, 
+        new SequentialAppenderService(mysql, duckdb)
+      );
+    }
+    return this.instances.get(databaseId)!;
+  }
+}
+```
+
+### Database Context Middleware
+
+Every request is scoped to a database via middleware:
+
+```typescript
+// src/middleware/database.ts
+export const attachDatabaseContext = (req, res, next) => {
+  const databaseId = req.query.db || 'default';
+  const dbConfig = DatabaseConfigManager.getInstance().getDatabase(databaseId);
+  
+  if (!dbConfig) {
+    return res.status(404).json({ error: 'Database not found' });
+  }
+  
+  // Attach database-specific connections to request
+  req.databaseId = databaseId;
+  req.duckdb = DuckDBConnection.getInstance(databaseId, dbConfig.duckdbPath);
+  req.mysql = MySQLConnection.getInstance(databaseId, dbConfig.mysqlConnectionString);
+  
+  next();
+};
+```
+
+## Database Management APIs
+
+### List All Databases
+
+```bash
+curl 'http://localhost:3001/api/databases' \
+  -H 'Authorization: Bearer ${DUCKLING_API_KEY}'
+```
+
+**Response:**
+
+```json
+[
+  {
+    "id": "lms",
+    "name": "LMS",
+    "mysqlConnectionString": "mysql://...",
+    "duckdbPath": "data/lms.db",
+    "createdAt": "2025-11-06T18:58:36.480Z",
+    "updatedAt": "2025-11-06T18:58:36.480Z"
+  }
+]
+```
+
+### Create Database
+
+```bash
+curl -X POST 'http://localhost:3001/api/databases' \
+  -H 'Authorization: Bearer ${DUCKLING_API_KEY}' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "My Database",
+    "mysqlConnectionString": "mysql://user:pass@host:port/mydb"
+  }'
+```
+
+<Note>
+  The `duckdbPath` is automatically generated as `data/{id}.db` where `{id}` is derived from the database name.
+</Note>
+
+### Update Database
+
+```bash
+curl -X PUT 'http://localhost:3001/api/databases/lms' \
+  -H 'Authorization: Bearer ${DUCKLING_API_KEY}' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "LMS (Updated)",
+    "mysqlConnectionString": "mysql://..."
+  }'
+```
+
+### Delete Database
+
+```bash
+curl -X DELETE 'http://localhost:3001/api/databases/lms' \
+  -H 'Authorization: Bearer ${DUCKLING_API_KEY}'
+```
+
+<Warning>
+  Deleting a database removes the configuration but **does not delete** the DuckDB file. You must manually delete `data/{id}.db` if needed.
+</Warning>
+
+### Test Connection
+
+```bash
+curl -X POST 'http://localhost:3001/api/databases/lms/test' \
+  -H 'Authorization: Bearer ${DUCKLING_API_KEY}'
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "message": "Connection successful",
+  "tableCount": 45
+}
+```
+
+## Using Multi-Database in API Calls
+
+All data endpoints accept the `?db={database_id}` query parameter:
+
+### Sync Specific Database
+
+```bash
+# Full sync
+curl -X POST 'http://localhost:3001/api/sync/full?db=lms' \
+  -H 'Authorization: Bearer ${DUCKLING_API_KEY}'
+
+# Incremental sync
+curl -X POST 'http://localhost:3001/api/sync/incremental?db=chitti_common' \
+  -H 'Authorization: Bearer ${DUCKLING_API_KEY}'
+```
+
+### Query Specific Database
+
+```bash
+curl -X POST 'http://localhost:3001/api/query?db=lms' \
+  -H 'Authorization: Bearer ${DUCKLING_API_KEY}' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "sql": "SELECT COUNT(*) FROM User"
+  }'
+```
+
+### Get Tables from Specific Database
+
+```bash
+curl 'http://localhost:3001/api/tables?db=lms' \
+  -H 'Authorization: Bearer ${DUCKLING_API_KEY}'
+```
+
+### Health Check Specific Database
+
+```bash
+curl 'http://localhost:3001/health?db=lms' \
+  -H 'Authorization: Bearer ${DUCKLING_API_KEY}'
+```
+
+## Frontend Integration
+
+### Database Selector Component
+
+The frontend provides a database selector in the header:
+
+```vue
+<!-- packages/frontend/app/components/DatabaseSelector.vue -->
+<template>
+  <select v-model="selectedDatabaseId" @change="handleChange">
+    <option v-for="db in databases" :key="db.id" :value="db.id">
+      {{ db.name }}
+    </option>
+  </select>
+</template>
+
+<script setup lang="ts">
+import { useDatabase } from '~/composables/useDatabase';
+
+const { selectedDatabaseId, databases, setDatabase } = useDatabase();
+
+const handleChange = () => {
+  setDatabase(selectedDatabaseId.value);
+  // Reload page data for new database
+  window.location.reload();
+};
+</script>
+```
+
+### useDatabase Composable
+
+```typescript
+// packages/frontend/app/composables/useDatabase.ts
+export const useDatabase = () => {
+  const selectedDatabaseId = ref(localStorage.getItem('selectedDatabase') || 'default');
+  const databases = ref<DatabaseConfig[]>([]);
+  
+  const setDatabase = (id: string) => {
+    selectedDatabaseId.value = id;
+    localStorage.setItem('selectedDatabase', id);
+  };
+  
+  const getApiUrlWithDatabase = (path: string) => {
+    return `${path}?db=${selectedDatabaseId.value}`;
+  };
+  
+  // Watch for database changes
+  watch(selectedDatabaseId, () => {
+    // Reload data when database changes
+  });
+  
+  return {
+    selectedDatabaseId,
+    databases,
+    setDatabase,
+    getApiUrlWithDatabase
+  };
+};
+```
+
+<Info>
+  The selected database is persisted in localStorage for session continuity. Users don't need to re-select after page refresh.
+</Info>
+
+## Isolation Benefits
+
+### Zero Cross-Contamination
+
+<CardGroup cols={2}>
+  <Card title="Connection Pools" icon="plug">
+    Each database has its own MySQL/DuckDB connection pools
+  </Card>
+  <Card title="Sync Services" icon="rotate">
+    Independent sync operations per database
+  </Card>
+  <Card title="Storage" icon="hard-drive">
+    Separate DuckDB files prevent data mixing
+  </Card>
+  <Card title="Watermarks" icon="bookmark">
+    Isolated watermark tracking per database
+  </Card>
+</CardGroup>
+
+### Resource Efficiency
+
+- **Single Server**: No need to deploy multiple instances
+- **Shared Worker Pool**: Sanitization workers shared across databases
+- **Unified Monitoring**: One dashboard for all databases
+- **Centralized Backups**: All databases backed up to same S3 bucket (different prefixes)
+
+## S3 Backup Configuration
+
+Each database can have independent S3 backup settings:
+
+### Get S3 Config
+
+```bash
+curl 'http://localhost:3001/api/databases/lms/s3' \
+  -H 'Authorization: Bearer ${DUCKLING_API_KEY}'
+```
+
+**Response:**
+
+```json
+{
+  "enabled": true,
+  "bucket": "my-duckling-backups",
+  "region": "us-east-1",
+  "accessKeyId": "AKIA...",
+  "secretAccessKey": "***",
+  "pathPrefix": "lms/",
+  "encryption": "client-aes256",
+  "encryptionKey": "***"
+}
+```
+
+<Note>
+  Sensitive fields (`secretAccessKey`, `encryptionKey`) are masked in API responses for security.
+</Note>
+
+### Update S3 Config
+
+```bash
+curl -X PUT 'http://localhost:3001/api/databases/lms/s3' \
+  -H 'Authorization: Bearer ${DUCKLING_API_KEY}' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "enabled": true,
+    "bucket": "my-backups",
+    "region": "us-east-1",
+    "accessKeyId": "AKIA...",
+    "secretAccessKey": "...",
+    "pathPrefix": "lms/",
+    "encryption": "client-aes256",
+    "encryptionKey": "a3f1c2d4e5b6a7f8..."
+  }'
+```
+
+### Test S3 Connection
+
+```bash
+curl -X POST 'http://localhost:3001/api/databases/lms/s3/test' \
+  -H 'Authorization: Bearer ${DUCKLING_API_KEY}'
+```
+
+## CDC (Change Data Capture) Per Database
+
+CDC can be started independently for each database:
+
+```bash
+# Start CDC for LMS database
+curl -X POST 'http://localhost:3001/api/cdc/start?db=lms' \
+  -H 'Authorization: Bearer ${DUCKLING_API_KEY}'
+
+# Get CDC stats for LMS
+curl 'http://localhost:3001/api/cdc/stats?db=lms' \
+  -H 'Authorization: Bearer ${DUCKLING_API_KEY}'
+
+# Stop CDC for LMS
+curl -X POST 'http://localhost:3001/api/cdc/stop?db=lms' \
+  -H 'Authorization: Bearer ${DUCKLING_API_KEY}'
+```
+
+## Production Best Practices
+
+### Database Naming
+
+- Use lowercase with underscores: `my_database`
+- Avoid special characters and spaces
+- Keep names short but descriptive
+
+### Connection Strings
+
+<Warning>
+  Always include `?dateStrings=true` in MySQL connection strings to prevent date/time conversion issues.
+</Warning>
+
+```bash
+mysql://user:pass@host:port/database?dateStrings=true&timezone=UTC
+```
+
+### Resource Allocation
+
+For multiple databases, increase connection pool sizes:
+
+```bash
+# Total MySQL connections = MYSQL_MAX_CONNECTIONS × number of databases
+MYSQL_MAX_CONNECTIONS=10
+
+# Total DuckDB connections = DUCKDB_MAX_CONNECTIONS × number of databases
+DUCKDB_MAX_CONNECTIONS=15
+```
+
+### Monitoring
+
+Monitor per-database metrics:
+
+```bash
+# Get status for all databases
+for db in lms chitti_common; do
+  curl "http://localhost:3001/status?db=$db" \
+    -H "Authorization: Bearer ${DUCKLING_API_KEY}"
+done
+```
+
+## Implementation Files
+
+| File | Purpose |
+|------|----------|
+| `src/database/databaseConfig.ts` | Database configuration manager |
+| `src/middleware/database.ts` | Request-scoped database context |
+| `src/database/duckdb.ts` | Multi-instance DuckDB connections |
+| `src/database/mysql.ts` | Multi-instance MySQL connections |
+| `packages/frontend/app/composables/useDatabase.ts` | Frontend database selector |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Architecture" href="/concepts/architecture" icon="sitemap">
+    Understand the complete system architecture
+  </Card>
+  <Card title="Sync Modes" href="/concepts/sync-modes" icon="rotate">
+    Learn about full sync, incremental sync, and CDC
+  </Card>
+</CardGroup>
